@@ -93,14 +93,14 @@ export class DataInsertionEngine {
 							const relationships = this.relationshipData.get(relationshipKey) || new Set();
 							const entityId = this.getEntityId(entity, entityType);
 							
-							// CRITICAL FIX: Only track relationship if both IDs are valid
-							if (entityId && relatedId) {
+							// Smart relationship handling: Only track when we have meaningful IDs
+							// For DGIdb, many entities use auto-increment IDs which are meaningful
+							if (this.isValidId(entityId) && this.isValidId(relatedId)) {
 								relationships.add(`${entityId}_${relatedId}`);
 								this.relationshipData.set(relationshipKey, relationships);
-							} else {
-								// DEBUG: Log when relationship tracking fails
-								console.warn(`Failed to track relationship: ${entityType}(${entityId}) -> ${relatedEntityType}(${relatedId})`);
 							}
+							// Skip relationship tracking for entities without proper IDs
+							// This is normal for document-style data like DGIdb
 							
 							// Recursively process nested entities
 							await this.processEntityRelationships(item, relatedEntityType, schemas, sql, [...path, key]);
@@ -212,6 +212,12 @@ export class DataInsertionEngine {
 	private getEntityId(entity: any, entityType: string): number | string | null {
 		const entityMap = this.processedEntities.get(entityType);
 		return entityMap?.get(entity) || null;
+	}
+	
+	private isValidId(id: number | string | null): boolean {
+		// Consider an ID valid if it's a non-null number or non-empty string
+		// Exclude placeholder values like 'null' strings
+		return id !== null && id !== undefined && id !== '' && id !== 'null';
 	}
 	
 	private async mapEntityToSchema(obj: any, schema: TableSchema, sql: any): Promise<any> {

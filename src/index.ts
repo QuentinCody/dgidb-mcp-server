@@ -462,6 +462,19 @@ export default {
 			return DGIdbMCP.serveSSE("/sse").fetch(request, env, ctx);
 		}
 
+		// New: Streamable HTTP transport endpoint (preferred)
+		if (url.pathname === "/mcp" || url.pathname.startsWith("/mcp/")) {
+			const protocolVersion = request.headers.get("MCP-Protocol-Version");
+			// @ts-ignore - Streamable HTTP transport handling
+			const resp = await DGIdbMCP.serve("/mcp").fetch(request, env, ctx);
+			if (protocolVersion && resp instanceof Response) {
+				const hdrs = new Headers(resp.headers);
+				hdrs.set("MCP-Protocol-Version", protocolVersion);
+				return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: hdrs });
+			}
+			return resp;
+		}
+
 		if (url.pathname === "/datasets" && request.method === "GET") {
 			const list = Array.from(datasetRegistry.entries()).map(([id, info]) => ({
 				data_access_id: id,
@@ -602,7 +615,7 @@ export default {
 		}
 
 		return new Response(
-			`${API_CONFIG.name} - Available on /sse endpoint`,
+			`${API_CONFIG.name} - Available endpoints:\n- /mcp (Streamable HTTP)\n- /sse (SSE legacy)`,
 			{ status: 404, headers: { "Content-Type": "text/plain", "MCP-Protocol-Version": "2025-06-18" } }
 		);
 	},
