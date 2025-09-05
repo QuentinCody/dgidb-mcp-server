@@ -1,5 +1,5 @@
-import { McpAgent } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { JsonToSqlDO } from "./do.js";
 import { DataQualityManager } from "./lib/DataQualityManager.js";
@@ -50,109 +50,57 @@ interface DGIdbEnv {
 // CORE MCP SERVER CLASS - Reusable template
 // ========================================
 
-export class DGIdbMCP extends McpAgent {
-	server = new McpServer({
-		name: API_CONFIG.name,
-		version: API_CONFIG.version,
-		description: API_CONFIG.description
-	});
-	
+export class DGIdbMCP {
 	private qualityManager = new DataQualityManager();
+	private env: DGIdbEnv;
 
-	async init() {
-		// Tool #1: GraphQL to SQLite staging
-		this.server.tool(
-			API_CONFIG.tools.graphql.name,
-			API_CONFIG.tools.graphql.description,
-			{
-				query: z.string().describe("GraphQL query string"),
-				variables: z.record(z.any()).optional().describe("Optional variables for the GraphQL query"),
-			},
-			async ({ query, variables }) => {
-				try {
-					const graphqlResult = await this.executeGraphQLQuery(query, variables);
+	constructor(env: DGIdbEnv) {
+		this.env = env;
+	}
 
-					if (this.shouldBypassStaging(graphqlResult, query)) {
-						return {
-							content: [{
-								type: "text" as const,
-								text: JSON.stringify(graphqlResult, null, 2)
-							}],
-							isError: false,
-							_meta: {
-								progress: 1.0,
-								statusMessage: "GraphQL query executed successfully",
-								operation_type: "read-only",
-								query_type: this.isIntrospectionQuery(query) ? "introspection" : "data_query"
-							},
-							resourceLinks: [{
-								uri: API_CONFIG.endpoint,
-								description: "DGIdb GraphQL API endpoint used for this query"
-							}]
-						};
-					}
+	public async handleGraphQLTool(args: any) {
+		const { query, variables } = args;
+		try {
+			const graphqlResult = await this.executeGraphQLQuery(query, variables);
 
-					const stagingResult = await this.stageDataInDurableObject(graphqlResult);
-					return {
-						content: [{
-							type: "text" as const,
-							text: JSON.stringify(stagingResult, null, 2)
-						}],
-						isError: false,
-						_meta: {
-							progress: 1.0,
-							statusMessage: "Data staged successfully for SQL querying",
-							operation_type: "data_processing",
-							data_access_id: stagingResult.data_access_id
-						},
-						resourceLinks: [{
-							uri: API_CONFIG.endpoint,
-							description: "DGIdb GraphQL API endpoint used for this query"
-						}]
-					};
-
-				} catch (error) {
-					return this.createErrorResponse("GraphQL execution failed", error);
-				}
+			if (this.shouldBypassStaging(graphqlResult, query)) {
+				return {
+					content: [{
+						type: "text" as const,
+						text: JSON.stringify(graphqlResult, null, 2)
+					}],
+					isError: false,
+				};
 			}
-		);
 
-		// Tool #2: SQL querying against staged data
-		this.server.tool(
-			API_CONFIG.tools.sql.name,
-			API_CONFIG.tools.sql.description,
-			{
-				data_access_id: z.string().describe("Data access ID from the GraphQL query tool"),
-				sql: z.string().describe("SQL SELECT query to execute"),
-				params: z.array(z.string()).optional().describe("Optional query parameters"),
-				include_quality_analysis: z.boolean().optional().describe("Include data quality analysis in response"),
-			},
-			async ({ data_access_id, sql, include_quality_analysis = false }) => {
-				try {
-					const queryResult = await this.executeSQLQuery(data_access_id, sql, include_quality_analysis);
-					return { 
-						content: [{ 
-							type: "text" as const, 
-							text: JSON.stringify(queryResult, null, 2) 
-						}],
-						isError: false,
-						_meta: {
-							progress: 1.0,
-							statusMessage: `SQL query executed successfully, returned ${queryResult.results?.length || 0} rows`,
-							operation_type: "read-only",
-							query_complexity: queryResult.complexity_score,
-							data_access_id: data_access_id
-						},
-						resourceLinks: [{
-							uri: "https://dgidb.org/",
-							description: "DGIdb web interface for drug-gene interaction data"
-						}]
-					};
-				} catch (error) {
-					return this.createErrorResponse("SQL execution failed", error);
-				}
-			}
-		);
+			const stagingResult = await this.stageDataInDurableObject(graphqlResult);
+			return {
+				content: [{
+					type: "text" as const,
+					text: JSON.stringify(stagingResult, null, 2)
+				}],
+				isError: false,
+			};
+
+		} catch (error) {
+			return this.createErrorResponse("GraphQL execution failed", error);
+		}
+	}
+
+	public async handleSQLTool(args: any) {
+		const { data_access_id, sql, include_quality_analysis = false } = args;
+		try {
+			const queryResult = await this.executeSQLQuery(data_access_id, sql, include_quality_analysis);
+			return { 
+				content: [{ 
+					type: "text" as const, 
+					text: JSON.stringify(queryResult, null, 2) 
+				}],
+				isError: false,
+			};
+		} catch (error) {
+			return this.createErrorResponse("SQL execution failed", error);
+		}
 	}
 
 	// ========================================
@@ -161,7 +109,6 @@ export class DGIdbMCP extends McpAgent {
 	private async executeGraphQLQuery(query: string, variables?: Record<string, any>): Promise<any> {
 		const headers = {
 			"Content-Type": "application/json",
-			"MCP-Protocol-Version": "2025-06-18",
 			...API_CONFIG.headers
 		};
 		
@@ -458,21 +405,186 @@ export default {
 		}
 
 		if (url.pathname === "/sse" || url.pathname.startsWith("/sse/")) {
-			// @ts-ignore - SSE transport handling
-			return DGIdbMCP.serveSSE("/sse").fetch(request, env, ctx);
+			// Handle SSE transport
+			if (request.method === "GET") {
+				// SSE connection setup
+				const { readable, writable } = new TransformStream();
+				const writer = writable.getWriter();
+				
+				// Setup SSE headers
+				const headers = new Headers({
+					"Content-Type": "text/event-stream",
+					"Cache-Control": "no-cache",
+					"Connection": "keep-alive",
+					"Access-Control-Allow-Origin": "*",
+					"Access-Control-Allow-Headers": "*",
+				});
+				
+				// Simple SSE implementation - send capabilities
+				writer.write(new TextEncoder().encode(`data: ${JSON.stringify({
+					jsonrpc: "2.0",
+					method: "notifications/initialized",
+					params: {}
+				})}\n\n`));
+				
+				return new Response(readable, { headers });
+			}
+			
+			return new Response(JSON.stringify({ error: "Method not allowed" }), {
+				status: 405,
+				headers: standardHeaders
+			});
 		}
 
-		// New: Streamable HTTP transport endpoint (preferred)
+		// Streamable HTTP transport endpoint 
 		if (url.pathname === "/mcp" || url.pathname.startsWith("/mcp/")) {
-			const protocolVersion = request.headers.get("MCP-Protocol-Version");
-			// @ts-ignore - Streamable HTTP transport handling
-			const resp = await DGIdbMCP.serve("/mcp").fetch(request, env, ctx);
-			if (protocolVersion && resp instanceof Response) {
-				const hdrs = new Headers(resp.headers);
-				hdrs.set("MCP-Protocol-Version", protocolVersion);
-				return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: hdrs });
+			// For now, let's implement a basic JSON-RPC over HTTP handler
+			if (request.method === "GET") {
+				return new Response(JSON.stringify({ error: "Method not allowed" }), {
+					status: 405,
+					headers: standardHeaders
+				});
 			}
-			return resp;
+			
+			if (request.method === "POST") {
+				try {
+					const mcpServer = new DGIdbMCP(env);
+					
+					const body = await request.text();
+					let jsonData;
+					
+					try {
+						jsonData = JSON.parse(body);
+					} catch (e) {
+						return new Response(JSON.stringify({ 
+							jsonrpc: "2.0",
+							id: null,
+							error: { code: -32700, message: "Parse error" }
+						}), {
+							status: 200,
+							headers: standardHeaders
+						});
+					}
+					
+					// Simple manual handling of MCP methods
+					if (jsonData.method === "initialize") {
+						return new Response(JSON.stringify({
+							jsonrpc: "2.0",
+							id: jsonData.id,
+							result: {
+								protocolVersion: "2025-06-18",
+								capabilities: {
+									tools: {},
+								},
+								serverInfo: {
+									name: API_CONFIG.name,
+									version: API_CONFIG.version
+								}
+							}
+						}), {
+							status: 200,
+							headers: standardHeaders
+						});
+					}
+					
+					if (jsonData.method === "tools/list") {
+						const tools = [
+							{
+								name: API_CONFIG.tools.graphql.name,
+								description: API_CONFIG.tools.graphql.description,
+								inputSchema: {
+									type: "object",
+									properties: {
+										query: { type: "string", description: "GraphQL query string" },
+										variables: { type: "object", description: "Optional variables for the GraphQL query" }
+									},
+									required: ["query"]
+								}
+							},
+							{
+								name: API_CONFIG.tools.sql.name,
+								description: API_CONFIG.tools.sql.description,
+								inputSchema: {
+									type: "object",
+									properties: {
+										data_access_id: { type: "string", description: "Data access ID from the GraphQL query tool" },
+										sql: { type: "string", description: "SQL SELECT query to execute" },
+										params: { type: "array", items: { type: "string" }, description: "Optional query parameters" },
+										include_quality_analysis: { type: "boolean", description: "Include data quality analysis in response" }
+									},
+									required: ["data_access_id", "sql"]
+								}
+							}
+						];
+						
+						return new Response(JSON.stringify({
+							jsonrpc: "2.0",
+							id: jsonData.id,
+							result: { tools }
+						}), {
+							status: 200,
+							headers: standardHeaders
+						});
+					}
+					
+					if (jsonData.method === "tools/call") {
+						const { name, arguments: args } = jsonData.params;
+						
+						let result;
+						if (name === API_CONFIG.tools.graphql.name) {
+							result = await mcpServer.handleGraphQLTool(args);
+						} else if (name === API_CONFIG.tools.sql.name) {
+							result = await mcpServer.handleSQLTool(args);
+						} else {
+							return new Response(JSON.stringify({
+								jsonrpc: "2.0",
+								id: jsonData.id,
+								error: { code: -32601, message: "Method not found" }
+							}), {
+								status: 200,
+								headers: standardHeaders
+							});
+						}
+						
+						return new Response(JSON.stringify({
+							jsonrpc: "2.0",
+							id: jsonData.id,
+							result
+						}), {
+							status: 200,
+							headers: standardHeaders
+						});
+					}
+					
+					return new Response(JSON.stringify({
+						jsonrpc: "2.0",
+						id: jsonData.id,
+						error: { code: -32601, message: "Method not found" }
+					}), {
+						status: 200,
+						headers: standardHeaders
+					});
+					
+				} catch (error) {
+					return new Response(JSON.stringify({
+						jsonrpc: "2.0",
+						id: null,
+						error: { 
+							code: -32603, 
+							message: "Internal error",
+							data: error instanceof Error ? error.message : String(error)
+						}
+					}), {
+						status: 200,
+						headers: standardHeaders
+					});
+				}
+			}
+			
+			return new Response(JSON.stringify({ error: "Method not allowed" }), {
+				status: 405,
+				headers: standardHeaders
+			});
 		}
 
 		if (url.pathname === "/datasets" && request.method === "GET") {
