@@ -1,5 +1,3 @@
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { JsonToSqlDO } from "./do.js";
 import { DataQualityManager } from "./lib/DataQualityManager.js";
@@ -36,6 +34,78 @@ const API_CONFIG = {
 
 // In-memory registry of staged datasets
 const datasetRegistry = new Map<string, { created: string; table_count?: number; total_rows?: number }>();
+
+const textEncoder = new TextEncoder();
+
+const MCP_TOOL_DEFINITIONS = [
+	{
+		name: API_CONFIG.tools.graphql.name,
+		description: API_CONFIG.tools.graphql.description,
+		inputSchema: {
+			type: "object",
+			properties: {
+				query: { type: "string", description: "GraphQL query string" },
+				variables: { type: "object", description: "Optional variables for the GraphQL query" }
+			},
+			required: ["query"]
+		}
+	},
+	{
+		name: API_CONFIG.tools.sql.name,
+		description: API_CONFIG.tools.sql.description,
+		inputSchema: {
+			type: "object",
+			properties: {
+				data_access_id: { type: "string", description: "Data access ID from the GraphQL query tool" },
+				sql: { type: "string", description: "SQL SELECT query to execute" },
+				params: { type: "array", items: { type: "string" }, description: "Optional query parameters" },
+				include_quality_analysis: { type: "boolean", description: "Include data quality analysis in response" }
+			},
+			required: ["data_access_id", "sql"]
+		}
+	}
+] as const;
+
+function acceptsMime(acceptHeader: string | null, mimeType: string): boolean {
+	if (!acceptHeader) {
+		return true;
+	}
+	const header = acceptHeader.toLowerCase();
+	return header.includes(mimeType) || header.includes("*/*");
+}
+
+function createJsonResponse(payload: unknown, status: number, baseHeaders: Record<string, string>) {
+	const headers = new Headers(baseHeaders);
+	headers.set("Content-Type", "application/json");
+	return new Response(JSON.stringify(payload, null, 2), {
+		status,
+		headers
+	});
+}
+
+function createAcceptedResponse(baseHeaders: Record<string, string>) {
+	const headers = new Headers(baseHeaders);
+	headers.delete("Content-Type");
+	return new Response(null, {
+		status: 202,
+		headers
+	});
+}
+
+function buildJsonRpcError(id: string | number | null, code: number, message: string, data?: unknown) {
+	const errorBody: any = {
+		jsonrpc: "2.0",
+		id,
+		error: {
+			code,
+			message
+		}
+	};
+	if (data !== undefined) {
+		errorBody.error.data = data;
+	}
+	return errorBody;
+}
 
 // ========================================
 // ENVIRONMENT INTERFACE
@@ -378,6 +448,201 @@ interface ExecutionContext {
 	passThroughOnException(): void;
 }
 
+async function handleStreamableHttp(request: Request, env: Env, standardHeaders: Record<string, string>): Promise<Response> {
+	const acceptHeader = request.headers.get("Accept");
+	const acceptsJson = acceptsMime(acceptHeader, "application/json");
+	const acceptsSse = acceptsMime(acceptHeader, "text/event-stream");
+
+	if (request.method === "OPTIONS") {
+		const headers = new Headers(standardHeaders);
+		headers.set("Allow", "GET,POST,OPTIONS");
+		return new Response(null, { status: 204, headers });
+	}
+
+	if (request.method === "GET") {
+		if (!acceptsSse) {
+			return createJsonResponse(
+				buildJsonRpcError(null, -32000, "Client must accept text/event-stream to open an SSE stream"),
+				406,
+				standardHeaders
+			);
+		}
+
+		const { readable, writable } = new TransformStream();
+		const writer = writable.getWriter();
+		const initialEvent = {
+			jsonrpc: "2.0",
+			method: "notifications/ready",
+			params: { message: "SSE stream established", timestamp: new Date().toISOString() }
+		};
+
+		await writer.write(textEncoder.encode(`data: ${JSON.stringify(initialEvent)}\n\n`));
+
+		request.signal.addEventListener("abort", () => {
+			writer.close().catch(() => {});
+		});
+
+		const headers = new Headers(standardHeaders);
+		headers.set("Content-Type", "text/event-stream");
+		headers.set("Cache-Control", "no-cache, no-transform");
+		headers.set("Connection", "keep-alive");
+
+		return new Response(readable, { status: 200, headers });
+	}
+
+	if (request.method !== "POST") {
+		return createJsonResponse(
+			buildJsonRpcError(null, -32600, "Unsupported HTTP method for MCP endpoint"),
+			405,
+			standardHeaders
+		);
+	}
+
+	let jsonData: any;
+
+	try {
+		const bodyText = await request.text();
+		jsonData = JSON.parse(bodyText);
+	} catch {
+		return createJsonResponse(buildJsonRpcError(null, -32700, "Parse error"), 200, standardHeaders);
+	}
+
+	if (typeof jsonData !== "object" || jsonData === null) {
+		return createJsonResponse(buildJsonRpcError(null, -32600, "Invalid request"), 200, standardHeaders);
+	}
+
+	const hasMethod = typeof jsonData.method === "string";
+	const hasId = Object.prototype.hasOwnProperty.call(jsonData, "id");
+
+	// Notifications do not include an id and should be acknowledged with 202
+	if (hasMethod && !hasId) {
+		return createAcceptedResponse(standardHeaders);
+	}
+
+	// JSON-RPC responses should be acknowledged with 202
+	if (!hasMethod && hasId) {
+		return createAcceptedResponse(standardHeaders);
+	}
+
+	if (!hasMethod) {
+		return createJsonResponse(buildJsonRpcError(null, -32600, "Invalid request"), 200, standardHeaders);
+	}
+
+	const requestId = jsonData.id ?? null;
+
+	if (jsonData.method === "initialize") {
+		if (!acceptsJson) {
+			return createJsonResponse(
+				buildJsonRpcError(requestId, -32000, "Client must accept application/json responses"),
+				406,
+				standardHeaders
+			);
+		}
+
+		return createJsonResponse(
+			{
+				jsonrpc: "2.0",
+				id: requestId,
+				result: {
+					protocolVersion: "2025-06-18",
+					capabilities: {
+						tools: {}
+					},
+					serverInfo: {
+						name: API_CONFIG.name,
+						version: API_CONFIG.version
+					}
+				}
+			},
+			200,
+			standardHeaders
+		);
+	}
+
+	if (jsonData.method === "tools/list") {
+		if (!acceptsJson) {
+			return createJsonResponse(
+				buildJsonRpcError(requestId, -32000, "Client must accept application/json responses"),
+				406,
+				standardHeaders
+			);
+		}
+
+		return createJsonResponse(
+			{
+				jsonrpc: "2.0",
+				id: requestId,
+				result: { tools: MCP_TOOL_DEFINITIONS }
+			},
+			200,
+			standardHeaders
+		);
+	}
+
+	if (jsonData.method === "tools/call") {
+		if (!acceptsSse) {
+			return createJsonResponse(
+				buildJsonRpcError(requestId, -32000, "Client must accept text/event-stream for tool calls"),
+				406,
+				standardHeaders
+			);
+		}
+
+		const { readable, writable } = new TransformStream();
+		const writer = writable.getWriter();
+
+		(async () => {
+			try {
+				const { name, arguments: args } = jsonData.params ?? {};
+				if (typeof name !== "string") {
+					const message = buildJsonRpcError(requestId, -32602, "Tool name missing in request");
+					await writer.write(textEncoder.encode(`data: ${JSON.stringify(message)}\n\n`));
+					return;
+				}
+
+				const mcpServer = new DGIdbMCP(env);
+				let result;
+
+				if (name === API_CONFIG.tools.graphql.name) {
+					result = await mcpServer.handleGraphQLTool(args);
+				} else if (name === API_CONFIG.tools.sql.name) {
+					result = await mcpServer.handleSQLTool(args);
+				} else {
+					const message = buildJsonRpcError(requestId, -32601, `Unknown tool: ${name}`);
+					await writer.write(textEncoder.encode(`data: ${JSON.stringify(message)}\n\n`));
+					return;
+				}
+
+				const response = {
+					jsonrpc: "2.0",
+					id: requestId,
+					result
+				};
+				await writer.write(textEncoder.encode(`data: ${JSON.stringify(response)}\n\n`));
+			} catch (error) {
+				const message = buildJsonRpcError(
+					requestId,
+					-32603,
+					"Internal error",
+					error instanceof Error ? error.message : String(error)
+				);
+				await writer.write(textEncoder.encode(`data: ${JSON.stringify(message)}\n\n`));
+			} finally {
+				await writer.close();
+			}
+		})();
+
+		const headers = new Headers(standardHeaders);
+		headers.set("Content-Type", "text/event-stream");
+		headers.set("Cache-Control", "no-cache, no-transform");
+		headers.set("Connection", "keep-alive");
+
+		return new Response(readable, { status: 200, headers });
+	}
+
+	return createJsonResponse(buildJsonRpcError(requestId, -32601, "Method not found"), 200, standardHeaders);
+}
+
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
@@ -438,153 +703,7 @@ export default {
 
 		// Streamable HTTP transport endpoint 
 		if (url.pathname === "/mcp" || url.pathname.startsWith("/mcp/")) {
-			// For now, let's implement a basic JSON-RPC over HTTP handler
-			if (request.method === "GET") {
-				return new Response(JSON.stringify({ error: "Method not allowed" }), {
-					status: 405,
-					headers: standardHeaders
-				});
-			}
-			
-			if (request.method === "POST") {
-				try {
-					const mcpServer = new DGIdbMCP(env);
-					
-					const body = await request.text();
-					let jsonData;
-					
-					try {
-						jsonData = JSON.parse(body);
-					} catch (e) {
-						return new Response(JSON.stringify({ 
-							jsonrpc: "2.0",
-							id: null,
-							error: { code: -32700, message: "Parse error" }
-						}), {
-							status: 200,
-							headers: standardHeaders
-						});
-					}
-					
-					// Simple manual handling of MCP methods
-					if (jsonData.method === "initialize") {
-						return new Response(JSON.stringify({
-							jsonrpc: "2.0",
-							id: jsonData.id,
-							result: {
-								protocolVersion: "2025-06-18",
-								capabilities: {
-									tools: {},
-								},
-								serverInfo: {
-									name: API_CONFIG.name,
-									version: API_CONFIG.version
-								}
-							}
-						}), {
-							status: 200,
-							headers: standardHeaders
-						});
-					}
-					
-					if (jsonData.method === "tools/list") {
-						const tools = [
-							{
-								name: API_CONFIG.tools.graphql.name,
-								description: API_CONFIG.tools.graphql.description,
-								inputSchema: {
-									type: "object",
-									properties: {
-										query: { type: "string", description: "GraphQL query string" },
-										variables: { type: "object", description: "Optional variables for the GraphQL query" }
-									},
-									required: ["query"]
-								}
-							},
-							{
-								name: API_CONFIG.tools.sql.name,
-								description: API_CONFIG.tools.sql.description,
-								inputSchema: {
-									type: "object",
-									properties: {
-										data_access_id: { type: "string", description: "Data access ID from the GraphQL query tool" },
-										sql: { type: "string", description: "SQL SELECT query to execute" },
-										params: { type: "array", items: { type: "string" }, description: "Optional query parameters" },
-										include_quality_analysis: { type: "boolean", description: "Include data quality analysis in response" }
-									},
-									required: ["data_access_id", "sql"]
-								}
-							}
-						];
-						
-						return new Response(JSON.stringify({
-							jsonrpc: "2.0",
-							id: jsonData.id,
-							result: { tools }
-						}), {
-							status: 200,
-							headers: standardHeaders
-						});
-					}
-					
-					if (jsonData.method === "tools/call") {
-						const { name, arguments: args } = jsonData.params;
-						
-						let result;
-						if (name === API_CONFIG.tools.graphql.name) {
-							result = await mcpServer.handleGraphQLTool(args);
-						} else if (name === API_CONFIG.tools.sql.name) {
-							result = await mcpServer.handleSQLTool(args);
-						} else {
-							return new Response(JSON.stringify({
-								jsonrpc: "2.0",
-								id: jsonData.id,
-								error: { code: -32601, message: "Method not found" }
-							}), {
-								status: 200,
-								headers: standardHeaders
-							});
-						}
-						
-						return new Response(JSON.stringify({
-							jsonrpc: "2.0",
-							id: jsonData.id,
-							result
-						}), {
-							status: 200,
-							headers: standardHeaders
-						});
-					}
-					
-					return new Response(JSON.stringify({
-						jsonrpc: "2.0",
-						id: jsonData.id,
-						error: { code: -32601, message: "Method not found" }
-					}), {
-						status: 200,
-						headers: standardHeaders
-					});
-					
-				} catch (error) {
-					return new Response(JSON.stringify({
-						jsonrpc: "2.0",
-						id: null,
-						error: { 
-							code: -32603, 
-							message: "Internal error",
-							data: error instanceof Error ? error.message : String(error)
-						}
-					}), {
-						status: 200,
-						headers: standardHeaders
-					});
-				}
-			}
-			
-			return new Response(JSON.stringify({ error: "Method not allowed" }), {
-				status: 405,
-				headers: standardHeaders
-			});
+			return handleStreamableHttp(request, env, standardHeaders);
 		}
 
 		if (url.pathname === "/datasets" && request.method === "GET") {
