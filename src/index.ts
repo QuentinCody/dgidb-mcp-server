@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { JsonToSqlDO } from "./do.js";
-import { DataQualityManager } from "./lib/DataQualityManager.js";
+import { JsonToSqlDO } from "./do";
+import { DataQualityManager } from "./lib/DataQualityManager";
 
 // ========================================
 // API CONFIGURATION - Customize for your GraphQL API

@@ -1,10 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 
-import { SchemaInferenceEngine } from "./lib/SchemaInferenceEngine.js";
-import { DataInsertionEngine } from "./lib/DataInsertionEngine.js";
-import { PaginationAnalyzer } from "./lib/PaginationAnalyzer.js";
-import { ChunkingEngine } from "./lib/ChunkingEngine.js";
-import { TableSchema, ProcessingResult, PaginationInfo } from "./lib/types.js";
+import { SchemaInferenceEngine } from "./lib/SchemaInferenceEngine";
+import { DataInsertionEngine } from "./lib/DataInsertionEngine";
+import { PaginationAnalyzer } from "./lib/PaginationAnalyzer";
+import { ChunkingEngine } from "./lib/ChunkingEngine";
+import { TableSchema, ProcessingResult, PaginationInfo } from "./lib/types";
 
 
 // Main Durable Object class - clean and focused

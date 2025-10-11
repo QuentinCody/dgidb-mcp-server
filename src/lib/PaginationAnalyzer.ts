@@ -1,4 +1,4 @@
-import { PaginationInfo } from "./types.js";
+import { PaginationInfo } from "./types";
 
 export class PaginationAnalyzer {
 	

@@ -1,4 +1,4 @@
-import { TableSchema } from "./types.js";
+import { TableSchema } from "./types";
 
 export interface ChunkMetadata {
 	contentId: string;

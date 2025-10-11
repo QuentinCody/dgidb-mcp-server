@@ -1,5 +1,5 @@
-import { TableSchema } from "./types.js";
-import { ChunkingEngine } from "./ChunkingEngine.js";
+import { TableSchema } from "./types";
+import { ChunkingEngine } from "./ChunkingEngine";
 
 export class DataInsertionEngine {
 	private chunkingEngine = new ChunkingEngine();
