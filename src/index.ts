@@ -647,14 +647,25 @@ export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 
-		// Standard MCP headers for all responses with enhanced security
+		// Standard MCP headers for all responses with enhanced security and CORS support
 		const standardHeaders = {
 			"Content-Type": "application/json",
 			"MCP-Protocol-Version": "2025-06-18",
 			"X-Content-Type-Options": "nosniff",
 			"X-Frame-Options": "DENY",
-			"Referrer-Policy": "strict-origin-when-cross-origin"
+			"Referrer-Policy": "strict-origin-when-cross-origin",
+			"Access-Control-Allow-Origin": "*",
+			"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+			"Access-Control-Allow-Headers": "*"
 		};
+
+		// Handle CORS preflight requests globally
+		if (request.method === "OPTIONS") {
+			return new Response(null, {
+				status: 204,
+				headers: standardHeaders
+			});
+		}
 
 		// Validate MCP protocol version in requests (required by 2025-06-18 spec)
 		const clientProtocolVersion = request.headers.get("MCP-Protocol-Version");
