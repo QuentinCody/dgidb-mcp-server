@@ -51,7 +51,12 @@ export class DGIdbMCP extends McpAgent {
 	server = new McpServer({
 		name: API_CONFIG.name,
 		version: API_CONFIG.version,
-		description: API_CONFIG.description
+		description: API_CONFIG.description,
+		capabilities: {
+			tools: {
+				listChanged: true
+			}
+		}
 	});
 
 	constructor(ctx: DurableObjectState, env: any) {
