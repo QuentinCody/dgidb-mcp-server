@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --port 8797",
     "format": "biome format --write",
     "lint:fix": "biome lint --fix",
     "start": "wrangler dev",
