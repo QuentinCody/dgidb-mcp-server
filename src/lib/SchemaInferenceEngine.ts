@@ -78,6 +78,12 @@ export class SchemaInferenceEngine {
 			return;
 		}
 
+		// Handle GraphQL nodes wrapper pattern (e.g., {nodes: [...]})
+		if (obj.nodes && Array.isArray(obj.nodes) && !this.isEntity(obj)) {
+			this.discoverEntities(obj.nodes, path, parentEntityType);
+			return;
+		}
+
 		// Process individual entities
 		if (this.isEntity(obj)) {
 			const entityType = this.inferEntityType(obj, path);
@@ -100,34 +106,47 @@ export class SchemaInferenceEngine {
 	
 	private processEntityProperties(entity: any, entityType: string): void {
 		for (const [key, value] of Object.entries(entity)) {
+			// Unwrap {nodes: [...]} or {edges: [{node: ...}]} wrappers to reach nested entity arrays
+			let items: any[] | null = null;
 			if (Array.isArray(value) && value.length > 0) {
+				items = value;
+			} else if (value && typeof value === 'object' && !Array.isArray(value)) {
+				const wrapper = value as Record<string, any>;
+				if (wrapper.nodes && Array.isArray(wrapper.nodes)) {
+					items = wrapper.nodes;
+				} else if (wrapper.edges && Array.isArray(wrapper.edges)) {
+					items = wrapper.edges.map((e: any) => e.node).filter(Boolean);
+				}
+			}
+
+			if (items && items.length > 0) {
 				// Check if this array contains entities
-				const firstItem = value.find(item => this.isEntity(item));
+				const firstItem = items.find(item => this.isEntity(item));
 				if (firstItem) {
 					const relatedEntityType = this.inferEntityType(firstItem, [key]);
 					this.recordRelationship(entityType, relatedEntityType);
-					
+
 					// Process all entities in this array
-					value.forEach(item => {
+					items.forEach(item => {
 						if (this.isEntity(item)) {
 							const entitiesOfType = this.discoveredEntities.get(relatedEntityType) || [];
 							entitiesOfType.push(item);
 							this.discoveredEntities.set(relatedEntityType, entitiesOfType);
-							
+
 							// Recursively process nested entities
 							this.processEntityProperties(item, relatedEntityType);
 						}
 					});
 				}
-			} else if (value && typeof value === 'object' && this.isEntity(value)) {
-				// Single related entity
+			} else if (value && typeof value === 'object' && !Array.isArray(value) && this.isEntity(value)) {
+				// 1:1 relationships use direct FK columns (e.g., gene_id) — no junction table needed.
+				// Only array relationships (many-to-many) get junction tables.
 				const relatedEntityType = this.inferEntityType(value, [key]);
-				this.recordRelationship(entityType, relatedEntityType);
-				
+
 				const entitiesOfType = this.discoveredEntities.get(relatedEntityType) || [];
 				entitiesOfType.push(value);
 				this.discoveredEntities.set(relatedEntityType, entitiesOfType);
-				
+
 				// Recursively process nested entities
 				this.processEntityProperties(value, relatedEntityType);
 			}
@@ -136,32 +155,37 @@ export class SchemaInferenceEngine {
 	
 	private isEntity(obj: any): boolean {
 		if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
-		
-		// An entity typically has an ID field or multiple meaningful fields
-		const hasId = obj.id !== undefined || obj._id !== undefined;
-		const fieldCount = Object.keys(obj).length;
-		const hasMultipleFields = fieldCount >= 2;
-		
-		// Check for common entity patterns
-		const hasEntityFields = obj.name !== undefined || obj.title !== undefined || 
-			obj.description !== undefined || obj.type !== undefined;
-		
-		return hasId || (hasMultipleFields && hasEntityFields);
+
+		const keys = Object.keys(obj);
+		const fieldCount = keys.length;
+		if (fieldCount < 2) return false;
+
+		// Has an ID field — definitely an entity
+		if (obj.id !== undefined || obj._id !== undefined) return true;
+
+		// Has common entity marker fields
+		if (obj.name !== undefined || obj.title !== undefined ||
+			obj.description !== undefined || obj.type !== undefined) return true;
+
+		// Any object with 2+ fields where at least one is a scalar value
+		// This catches structured objects like {interactionScore, drug, interactionTypes}
+		const hasScalarField = keys.some(key => {
+			const value = obj[key];
+			return value !== null && value !== undefined && typeof value !== 'object';
+		});
+		return hasScalarField;
 	}
 	
 	private inferEntityType(obj: any, path: string[]): string {
 		// Try to infer type from object properties (e.g., __typename)
 		if (obj.__typename) return this.sanitizeTableName(obj.__typename);
-		if (obj.type && typeof obj.type === 'string' && !['edges', 'node'].includes(obj.type.toLowerCase())) {
-			return this.sanitizeTableName(obj.type);
-		}
 		
 		// Infer from path context, attempting to singularize
 		if (path.length > 0) {
 			let lastName = path[path.length - 1];
 
-			// Handle GraphQL patterns
-			if (lastName === 'node' && path.length > 1) {
+			// Handle GraphQL patterns (must match DataInsertionEngine.inferEntityType)
+			if ((lastName === 'node' || lastName === 'nodes') && path.length > 1) {
 				lastName = path[path.length - 2];
 				if (lastName === 'edges' && path.length > 2) {
 					lastName = path[path.length - 3];
@@ -293,26 +317,40 @@ export class SchemaInferenceEngine {
 	
 	private createJunctionTableSchemas(schemas: Record<string, TableSchema>): void {
 		const junctionTables = new Set<string>();
-		
+
 		for (const [fromTable, relatedTables] of this.entityRelationships.entries()) {
 			for (const toTable of relatedTables) {
 				// Create a consistent junction table name (alphabetical order to avoid duplicates)
-				const junctionName = [fromTable, toTable].sort().join('_');
-				
+				const [sortedA, sortedB] = [fromTable, toTable].sort();
+				const junctionName = `${sortedA}_${sortedB}`;
+
 				if (!junctionTables.has(junctionName)) {
 					junctionTables.add(junctionName);
-					
+
+					// Match FK type to the referenced entity's PK type
+					const aIdType = this.getEntityIdType(sortedA, schemas);
+					const bIdType = this.getEntityIdType(sortedB, schemas);
+
 					schemas[junctionName] = {
 						columns: {
 							id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
-							[`${fromTable}_id`]: 'INTEGER',
-							[`${toTable}_id`]: 'INTEGER'
+							[`${sortedA}_id`]: aIdType,
+							[`${sortedB}_id`]: bIdType
 						},
 						sample_data: []
 					};
 				}
 			}
 		}
+	}
+
+	private getEntityIdType(entityType: string, schemas: Record<string, TableSchema>): string {
+		const schema = schemas[entityType];
+		if (!schema) return 'INTEGER';
+		const idCol = schema.columns.id;
+		// If the entity table has TEXT or string-based PK, use TEXT for the FK
+		if (idCol && (idCol === 'TEXT' || idCol === 'TEXT PRIMARY KEY')) return 'TEXT';
+		return 'INTEGER';
 	}
 	
 	private createSchemaFromPrimitiveOrSimpleArray(data: any, tableName: string): TableSchema {
@@ -412,6 +450,8 @@ export class SchemaInferenceEngine {
 			columns.id = "INTEGER PRIMARY KEY AUTOINCREMENT";
 		} else if (columns.id === "INTEGER") {
 			columns.id = "INTEGER PRIMARY KEY";
+		} else if (columns.id === "TEXT") {
+			columns.id = "TEXT PRIMARY KEY";
 		}
 	}
 	

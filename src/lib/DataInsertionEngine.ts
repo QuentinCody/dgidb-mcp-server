@@ -40,15 +40,15 @@ export class DataInsertionEngine {
 
 	private async insertAllEntities(obj: any, schemas: Record<string, TableSchema>, sql: any, path: string[] = []): Promise<void> {
 		if (!obj || typeof obj !== 'object') return;
-		
-		// Handle arrays of entities
+
+		// Handle arrays
 		if (Array.isArray(obj)) {
 			for (const item of obj) {
 				await this.insertAllEntities(item, schemas, sql, path);
 			}
 			return;
 		}
-		
+
 		// Handle GraphQL edges pattern
 		if (obj.edges && Array.isArray(obj.edges)) {
 			const nodes = obj.edges.map((edge: any) => edge.node).filter(Boolean);
@@ -57,75 +57,66 @@ export class DataInsertionEngine {
 			}
 			return;
 		}
-		
-		// Handle individual entities
+
+		// CHILDREN FIRST: Recursively process all nested values before this entity.
+		// This ensures child entities (drug, interactionType) are in processedEntities
+		// before their parent (interaction) tries to resolve foreign keys.
+		for (const [key, value] of Object.entries(obj)) {
+			if (value && typeof value === 'object') {
+				await this.insertAllEntities(value, schemas, sql, [...path, key]);
+			}
+		}
+
+		// THEN insert this entity (all nested entities are now available for FK resolution)
 		if (this.isEntity(obj)) {
 			const entityType = this.inferEntityType(obj, path);
 			if (schemas[entityType]) {
-				await this.insertEntityRecord(obj, entityType, schemas[entityType], sql);
-				
-				// Process nested entities and record relationships
-				await this.processEntityRelationships(obj, entityType, schemas, sql, path);
+				const entityId = await this.insertEntityRecord(obj, entityType, schemas[entityType], sql);
+
+				// Track relationships for junction tables
+				if (entityId !== null) {
+					this.trackEntityRelationships(obj, entityType, entityId, schemas);
+				}
 			}
-		}
-		
-		// Recursively explore nested objects
-		for (const [key, value] of Object.entries(obj)) {
-			await this.insertAllEntities(value, schemas, sql, [...path, key]);
 		}
 	}
-	
-	private async processEntityRelationships(entity: any, entityType: string, schemas: Record<string, TableSchema>, sql: any, path: string[]): Promise<void> {
+
+	private trackEntityRelationships(entity: any, entityType: string, entityId: number | string, schemas: Record<string, TableSchema>): void {
 		for (const [key, value] of Object.entries(entity)) {
+			// Unwrap {nodes: [...]} or {edges: [{node: ...}]} wrappers, or use array directly
+			let items: any[] | null = null;
 			if (Array.isArray(value) && value.length > 0) {
-				// Check if this array contains entities
-				const firstItem = value.find(item => this.isEntity(item));
-				if (firstItem) {
-					const relatedEntityType = this.inferEntityType(firstItem, [key]);
-					
-					// Process all entities in this array and record relationships
-					for (const item of value) {
-						if (this.isEntity(item) && schemas[relatedEntityType]) {
-							const relatedId = await this.insertEntityRecord(item, relatedEntityType, schemas[relatedEntityType], sql);
-							
-							// Track this relationship for junction table creation
-							const relationshipKey = [entityType, relatedEntityType].sort().join('_');
-							const relationships = this.relationshipData.get(relationshipKey) || new Set();
-							const entityId = this.getEntityId(entity, entityType);
-							
-							// Smart relationship handling: Only track when we have meaningful IDs
-							// For DGIdb, many entities use auto-increment IDs which are meaningful
-							if (this.isValidId(entityId) && this.isValidId(relatedId)) {
-								relationships.add(`${entityId}_${relatedId}`);
-								this.relationshipData.set(relationshipKey, relationships);
-							}
-							// Skip relationship tracking for entities without proper IDs
-							// This is normal for document-style data like DGIdb
-							
-							// Recursively process nested entities
-							await this.processEntityRelationships(item, relatedEntityType, schemas, sql, [...path, key]);
-						}
-					}
-				}
-			} else if (value && typeof value === 'object' && this.isEntity(value)) {
-				// Single related entity
-				const relatedEntityType = this.inferEntityType(value, [key]);
-				if (schemas[relatedEntityType]) {
-					const relatedId = await this.insertEntityRecord(value, relatedEntityType, schemas[relatedEntityType], sql);
-					
-					// Track single entity relationship
-					const relationshipKey = [entityType, relatedEntityType].sort().join('_');
-					const relationships = this.relationshipData.get(relationshipKey) || new Set();
-					const entityId = this.getEntityId(entity, entityType);
-					
-					if (entityId && relatedId && schemas[relationshipKey]) {
-						relationships.add(`${entityId}_${relatedId}`);
-						this.relationshipData.set(relationshipKey, relationships);
-					}
-					
-					await this.processEntityRelationships(value, relatedEntityType, schemas, sql, [...path, key]);
+				items = value;
+			} else if (value && typeof value === 'object' && !Array.isArray(value)) {
+				const wrapper = value as Record<string, any>;
+				if (wrapper.nodes && Array.isArray(wrapper.nodes)) {
+					items = wrapper.nodes;
+				} else if (wrapper.edges && Array.isArray(wrapper.edges)) {
+					items = wrapper.edges.map((e: any) => e.node).filter(Boolean);
 				}
 			}
+			// 1:1 nested entities (single objects) use direct FK columns — no junction table needed.
+			if (!items || items.length === 0) continue;
+
+			const firstItem = items.find(item => this.isEntity(item));
+			if (!firstItem) continue;
+
+			const relatedType = this.inferEntityType(firstItem, [key]);
+			const junctionName = [entityType, relatedType].sort().join('_');
+			if (!schemas[junctionName]) continue;
+
+			const pairs = this.relationshipData.get(junctionName) || new Set<string>();
+			for (const item of items) {
+				if (!this.isEntity(item)) continue;
+				const relatedId = this.getEntityId(item, relatedType);
+				if (this.isValidId(entityId) && this.isValidId(relatedId)) {
+					const [sortedType1] = [entityType, relatedType].sort();
+					const id1 = sortedType1 === entityType ? entityId : relatedId;
+					const id2 = sortedType1 === entityType ? relatedId : entityId;
+					pairs.add(`${id1}::${id2}`);
+				}
+			}
+			this.relationshipData.set(junctionName, pairs);
 		}
 	}
 	
@@ -142,76 +133,55 @@ export class DataInsertionEngine {
 		const columns = Object.keys(rowData);
 		const placeholders = columns.map(() => '?').join(', ');
 		const values = Object.values(rowData);
-		
-		// CRITICAL FIX: Handle UUID-based IDs properly
+
 		let insertedId: number | string | null = null;
-		
-		// If entity has a UUID-style ID, use it directly
+
 		if (entity.id && (typeof entity.id === 'string' || typeof entity.id === 'number')) {
+			// Entity has its own ID — use it directly
 			insertedId = entity.id;
-			// For string IDs, use REPLACE to handle conflicts
 			const insertSQL = `INSERT OR REPLACE INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders})`;
 			sql.exec(insertSQL, ...values);
 		} else {
-			// For auto-increment IDs
-			const insertSQL = `INSERT OR IGNORE INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders})`;
-			const result = sql.exec(insertSQL, ...values);
-			
-			// Get the last inserted row ID only if the insert succeeded
-			if (result.changes > 0) {
-				try {
-					const lastIdResult = sql.exec(`SELECT last_insert_rowid() as id`);
-					const lastIdRows = lastIdResult.toArray();
-					if (lastIdRows.length === 1) {
-						insertedId = lastIdRows[0]?.id || null;
-					}
-				} catch (error) {
-					console.warn(`Failed to get last_insert_rowid for ${tableName}:`, error);
-					insertedId = null;
-				}
-			} else {
-				// Row already exists, find its ID
-				try {
-					const existingResult = sql.exec(`SELECT rowid FROM ${tableName} WHERE ${columns.map(col => `${col} = ?`).join(' AND ')} LIMIT 1`, ...values);
-					const existingRows = existingResult.toArray();
-					if (existingRows.length === 1) {
-						insertedId = existingRows[0]?.rowid || null;
-					}
-				} catch (error) {
-					console.warn(`Failed to find existing rowid for ${tableName}:`, error);
-					insertedId = null;
-				}
+			// Auto-increment ID — insert then get last_insert_rowid()
+			const insertSQL = `INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders})`;
+			sql.exec(insertSQL, ...values);
+			try {
+				const idRow = sql.exec(`SELECT last_insert_rowid() as lid`).toArray();
+				insertedId = idRow[0]?.lid ?? null;
+			} catch {
+				insertedId = null;
 			}
 		}
-		
-		// Track this entity with proper ID
+
+		// Track this entity by object reference for FK resolution
 		if (insertedId !== null) {
 			entityMap.set(entity, insertedId);
 			this.processedEntities.set(tableName, entityMap);
 		}
-		
+
 		return insertedId;
 	}
 	
 	private async insertJunctionTableRecords(data: any, schemas: Record<string, TableSchema>, sql: any): Promise<void> {
-		// Only create junction table records for relationships that actually have data
-		for (const [relationshipKey, relationshipPairs] of this.relationshipData.entries()) {
-			if (schemas[relationshipKey]) {
-				const [table1, table2] = relationshipKey.split('_');
-				
-				for (const pairKey of relationshipPairs) {
-					const [id1, id2] = pairKey.split('_').map(Number);
-					
-					const insertSQL = `INSERT OR IGNORE INTO ${relationshipKey} (${table1}_id, ${table2}_id) VALUES (?, ?)`;
-					sql.exec(insertSQL, id1, id2);
-				}
+		for (const [junctionName, pairs] of this.relationshipData.entries()) {
+			if (!schemas[junctionName]) continue;
+			// Junction table name is sorted: "drug_interaction" → columns are drug_id, interaction_id
+			const columns = Object.keys(schemas[junctionName].columns).filter(c => c.endsWith('_id'));
+			if (columns.length < 2) continue;
+
+			for (const pairKey of pairs) {
+				const [id1Str, id2Str] = pairKey.split('::');
+				const id1 = isNaN(Number(id1Str)) ? id1Str : Number(id1Str);
+				const id2 = isNaN(Number(id2Str)) ? id2Str : Number(id2Str);
+				const insertSQL = `INSERT OR IGNORE INTO ${junctionName} (${columns[0]}, ${columns[1]}) VALUES (?, ?)`;
+				sql.exec(insertSQL, id1, id2);
 			}
 		}
 	}
 	
 	private getEntityId(entity: any, entityType: string): number | string | null {
 		const entityMap = this.processedEntities.get(entityType);
-		return entityMap?.get(entity) || null;
+		return entityMap?.get(entity) ?? null;
 	}
 	
 	private isValidId(id: number | string | null): boolean {
@@ -222,103 +192,148 @@ export class DataInsertionEngine {
 	
 	private async mapEntityToSchema(obj: any, schema: TableSchema, sql: any): Promise<any> {
 		const rowData: any = {};
-		
+
 		if (!obj || typeof obj !== 'object') {
 			if (schema.columns.value) rowData.value = obj;
 			return rowData;
 		}
-		
+
 		for (const columnName of Object.keys(schema.columns)) {
 			if (columnName === 'id' && schema.columns[columnName].includes('AUTOINCREMENT')) {
 				continue;
 			}
-			
+
 			let value = null;
-			
-			// Handle foreign key columns
-			if (columnName.endsWith('_id') && !columnName.includes('_json')) {
+			let found = false;
+
+			// 1. Handle JSON columns with chunking
+			if (columnName.endsWith('_json')) {
+				const baseKey = columnName.slice(0, -5);
+				const originalKey = this.findOriginalKey(obj, baseKey);
+				if (originalKey && obj[originalKey] && typeof obj[originalKey] === 'object') {
+					value = await this.chunkingEngine.smartJsonStringify(obj[originalKey], sql);
+					found = true;
+				}
+			}
+
+			// 2. Try direct column match FIRST (handles camelCase→snake_case like interactionScore→interaction_score)
+			if (!found) {
+				const originalKey = this.findOriginalKey(obj, columnName);
+				if (originalKey && obj[originalKey] !== undefined) {
+					value = obj[originalKey];
+					if (typeof value === 'boolean') value = value ? 1 : 0;
+					// Skip arrays of entities (handled via junction tables)
+					if (Array.isArray(value) && value.length > 0 && this.isEntity(value[0])) {
+						continue;
+					}
+					// Skip nested entity objects (handled via foreign keys)
+					if (value && typeof value === 'object' && !Array.isArray(value) && this.isEntity(value)) {
+						value = null;
+					} else {
+						found = true;
+					}
+				}
+			}
+
+			// 3. Handle foreign key columns — look up the related entity's database-assigned ID
+			if (!found && columnName.endsWith('_id')) {
 				const baseKey = columnName.slice(0, -3);
 				const originalKey = this.findOriginalKey(obj, baseKey);
 				if (originalKey && obj[originalKey] && typeof obj[originalKey] === 'object') {
-					value = (obj[originalKey] as any).id || null;
+					const nestedEntity = obj[originalKey];
+					// First check if we already inserted this entity and have its DB id
+					for (const [tableName, entityMap] of this.processedEntities.entries()) {
+						if (entityMap.has(nestedEntity)) {
+							value = entityMap.get(nestedEntity)!;
+							found = true;
+							break;
+						}
+					}
+					// Fall back to the entity's own id field
+					if (!found && nestedEntity.id !== undefined) {
+						value = nestedEntity.id;
+						found = true;
+					}
 				}
 			}
-			// Handle prefixed columns (from nested scalar fields)
-			else if (columnName.includes('_') && !columnName.endsWith('_json')) {
+
+			// 4. Try nested field extraction (prefix_subfield from prefix.subfield)
+			if (!found && columnName.includes('_') && !columnName.endsWith('_json') && !columnName.endsWith('_id')) {
 				const parts = columnName.split('_');
-				if (parts.length >= 2) {
-					const baseKey = parts[0];
-					const subKey = parts.slice(1).join('_');
+				for (let splitPoint = 1; splitPoint < parts.length; splitPoint++) {
+					const baseKey = parts.slice(0, splitPoint).join('_');
+					const subKey = parts.slice(splitPoint).join('_');
 					const originalKey = this.findOriginalKey(obj, baseKey);
-					if (originalKey && obj[originalKey] && typeof obj[originalKey] === 'object') {
+					if (originalKey && obj[originalKey] && typeof obj[originalKey] === 'object' && !Array.isArray(obj[originalKey])) {
 						const nestedObj = obj[originalKey];
 						const originalSubKey = this.findOriginalKey(nestedObj, subKey);
 						if (originalSubKey && nestedObj[originalSubKey] !== undefined) {
 							value = nestedObj[originalSubKey];
 							if (typeof value === 'boolean') value = value ? 1 : 0;
+							found = true;
+							break;
 						}
 					}
 				}
 			}
-			// Handle JSON columns with chunking
-			else if (columnName.endsWith('_json')) {
-				const baseKey = columnName.slice(0, -5);
-				const originalKey = this.findOriginalKey(obj, baseKey);
-				if (originalKey && obj[originalKey] && typeof obj[originalKey] === 'object') {
-					value = await this.chunkingEngine.smartJsonStringify(obj[originalKey], sql);
-				}
-			}
-			// Handle regular columns
-			else {
-				const originalKey = this.findOriginalKey(obj, columnName);
-				if (originalKey && obj[originalKey] !== undefined) {
-					value = obj[originalKey];
-					if (typeof value === 'boolean') value = value ? 1 : 0;
-					
-					// Skip arrays of entities (they're handled via junction tables)
-					if (Array.isArray(value) && value.length > 0 && this.isEntity(value[0])) {
-						continue;
-					}
-				}
-			}
-			
-			if (value !== null && value !== undefined) {
+
+			if (found && value !== null && value !== undefined) {
 				rowData[columnName] = value;
 			}
 		}
-		
+
 		return rowData;
 	}
 	
 	// Entity detection and type inference (reuse logic from SchemaInferenceEngine)
 	private isEntity(obj: any): boolean {
 		if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
-		
-		const hasId = obj.id !== undefined || obj._id !== undefined;
-		const fieldCount = Object.keys(obj).length;
-		const hasMultipleFields = fieldCount >= 2;
-		
-		const hasEntityFields = obj.name !== undefined || obj.title !== undefined || 
-			obj.description !== undefined || obj.type !== undefined;
-		
-		return hasId || (hasMultipleFields && hasEntityFields);
+
+		const keys = Object.keys(obj);
+		const fieldCount = keys.length;
+		if (fieldCount < 2) return false;
+
+		if (obj.id !== undefined || obj._id !== undefined) return true;
+
+		if (obj.name !== undefined || obj.title !== undefined ||
+			obj.description !== undefined || obj.type !== undefined) return true;
+
+		// Any object with 2+ fields where at least one is a scalar value
+		const hasScalarField = keys.some(key => {
+			const value = obj[key];
+			return value !== null && value !== undefined && typeof value !== 'object';
+		});
+		return hasScalarField;
 	}
 	
 	private inferEntityType(obj: any, path: string[]): string {
+		// Must match SchemaInferenceEngine.inferEntityType exactly for junction table consistency
 		if (obj.__typename) return this.sanitizeTableName(obj.__typename);
-		if (obj.type && typeof obj.type === 'string') return this.sanitizeTableName(obj.type);
-		
+
 		if (path.length > 0) {
-			const lastPath = path[path.length - 1];
-			if (lastPath === 'edges' && path.length > 1) {
-				return this.sanitizeTableName(path[path.length - 2]);
+			let lastName = path[path.length - 1];
+
+			// Handle GraphQL patterns (matches SchemaInferenceEngine)
+			if ((lastName === 'node' || lastName === 'nodes') && path.length > 1) {
+				lastName = path[path.length - 2];
+				if (lastName === 'edges' && path.length > 2) {
+					lastName = path[path.length - 3];
+				}
+			} else if (lastName === 'edges' && path.length > 1) {
+				lastName = path[path.length - 2];
 			}
-			if (lastPath.endsWith('s') && lastPath.length > 1) {
-				return this.sanitizeTableName(lastPath.slice(0, -1));
+
+			// Sanitize THEN singularize (matches SchemaInferenceEngine order)
+			const sanitized = this.sanitizeTableName(lastName);
+			if (sanitized.endsWith('ies')) {
+				return sanitized.slice(0, -3) + 'y';
+			} else if (sanitized.endsWith('s') && !sanitized.endsWith('ss') && sanitized.length > 1) {
+				const potentialSingular = sanitized.slice(0, -1);
+				if (potentialSingular.length > 1) return potentialSingular;
 			}
-			return this.sanitizeTableName(lastPath);
+			return sanitized;
 		}
-		
+
 		return 'entity_' + Math.random().toString(36).substr(2, 9);
 	}
 	

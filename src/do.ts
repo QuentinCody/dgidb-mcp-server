@@ -68,7 +68,7 @@ export class JsonToSqlDO extends DurableObject {
 				results,
 				row_count: results.length,
 				column_names: result.columnNames || [],
-				query_type: validationResult.queryType
+
 			};
 
 		} catch (error) {
@@ -98,8 +98,6 @@ export class JsonToSqlDO extends DurableObject {
 			return {
 				...result,
 				results: enhancedResults,
-				chunked_content_resolved: enhancedResults.length !== result.results.length || 
-					JSON.stringify(enhancedResults) !== JSON.stringify(result.results)
 			};
 
 		} catch (error) {
@@ -361,38 +359,28 @@ export class JsonToSqlDO extends DurableObject {
 
 		for (const [tableName, schema] of Object.entries(schemas)) {
 			try {
-				// Validate table name before querying
 				const validatedTableName = this.validateAndFixIdentifier(tableName, 'table');
-				
-				// Use safer query execution with proper error handling
 				const countResult = this.ctx.storage.sql.exec(`SELECT COUNT(*) as count FROM ${validatedTableName}`);
 				const countRows = countResult.toArray();
-				
+
 				let rowCount = 0;
 				if (countRows.length === 1) {
 					const countRow = countRows[0];
 					rowCount = typeof countRow?.count === 'number' ? countRow.count : 0;
 				}
 
-				const sampleResult = this.ctx.storage.sql.exec(`SELECT * FROM ${validatedTableName} LIMIT 3`);
-				const sampleData = sampleResult.toArray();
-
 				metadata.schemas![tableName] = {
-					columns: schema.columns,
-					row_count: rowCount,
-					sample_data: sampleData
+					columns: Object.keys(schema.columns),
+					row_count: rowCount
 				};
 
 				metadata.total_rows! += rowCount;
 
 			} catch (error) {
-				// Log the specific error for debugging but continue with other tables
 				console.warn(`Error processing table ${tableName}:`, error);
-				// Add fallback metadata for this table
 				metadata.schemas![tableName] = {
-					columns: schema.columns,
-					row_count: 0,
-					sample_data: []
+					columns: Object.keys(schema.columns),
+					row_count: 0
 				};
 			}
 		}
@@ -437,9 +425,6 @@ export class JsonToSqlDO extends DurableObject {
 						rowCount = typeof countRow?.count === 'number' ? countRow.count : 0;
 					}
 					
-					// Get sample data (first 3 rows)
-					const sampleData = this.ctx.storage.sql.exec(`SELECT * FROM ${tableName} LIMIT 3`).toArray();
-					
 					// Get foreign key information
 					const foreignKeys = this.ctx.storage.sql.exec(`PRAGMA foreign_key_list(${tableName})`).toArray();
 					
@@ -465,7 +450,6 @@ export class JsonToSqlDO extends DurableObject {
 							name: String(idx.name),
 							unique: Boolean(idx.unique)
 						})),
-						sample_data: sampleData
 					};
 				} catch (tableError) {
 					// Skip this table if there's an error processing it

@@ -21,7 +21,13 @@ const API_CONFIG = {
 	tools: {
 		graphql: {
 			name: "dgidb_graphql_query",
-			description: "Executes GraphQL queries against DGIdb API, processes responses into SQLite tables, and returns metadata for subsequent SQL querying. Returns a data_access_id and schema information."
+			description: `Executes GraphQL queries against the DGIdb (Drug-Gene Interaction Database) API. Responses are staged in SQLite tables.
+
+IMPORTANT: Gene.interactions is a plain list (NOT a Relay connection). Do NOT use pagination args (first/after) or .nodes on interactions.
+• Correct: { genes(names: ["EGFR"]) { nodes { interactions { interactionScore drug { name approved } } } } }
+• Wrong: interactions(first: 10) { nodes { ... } }
+
+Top-level queries (genes, drugs) use Relay connections with nodes/edges, but nested fields like interactions and interactionTypes are plain arrays.`
 		},
 		sql: {
 			name: "dgidb_query_sql",
@@ -80,7 +86,7 @@ export class DGIdbMCP extends McpAgent {
 						return {
 							content: [{
 								type: "text" as const,
-								text: JSON.stringify(graphqlResult, null, 2)
+								text: JSON.stringify(graphqlResult)
 							}],
 							isError: false,
 						};
@@ -90,7 +96,7 @@ export class DGIdbMCP extends McpAgent {
 					return {
 						content: [{
 							type: "text" as const,
-							text: JSON.stringify(stagingResult, null, 2)
+							text: JSON.stringify(stagingResult)
 						}],
 						isError: false,
 					};
@@ -117,7 +123,7 @@ export class DGIdbMCP extends McpAgent {
 					return {
 						content: [{
 							type: "text" as const,
-							text: JSON.stringify(queryResult, null, 2)
+							text: JSON.stringify(queryResult)
 						}],
 						isError: false,
 					};
@@ -338,7 +344,7 @@ export class DGIdbMCP extends McpAgent {
 					details: errorDetails,
 					timestamp,
 					help: "Check the DGIdb API documentation for valid query formats and parameters"
-				}, null, 2)
+				})
 			}],
 			isError: true,
 			_meta: {
@@ -395,7 +401,7 @@ export default {
 				data_access_id: id,
 				...info
 			}));
-			return new Response(JSON.stringify({ datasets: list }, null, 2), {
+			return new Response(JSON.stringify({ datasets: list }), {
 				headers: { "Content-Type": "application/json" }
 			});
 		}
