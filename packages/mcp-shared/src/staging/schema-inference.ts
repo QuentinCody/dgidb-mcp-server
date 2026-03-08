@@ -483,8 +483,13 @@ export interface MaterializationResult {
 function sqlValue(v: unknown): unknown {
 	if (v === null || v === undefined) return null;
 	if (Array.isArray(v)) {
-		// Scalar array → pipe-delimited
 		if (v.length === 0) return null;
+		// Arrays containing objects → JSON.stringify to preserve structure
+		// (prevents data loss from String({}) → "[object Object]")
+		if (v.some((item) => item !== null && typeof item === "object")) {
+			return JSON.stringify(v);
+		}
+		// Scalar array → pipe-delimited
 		return v.map((item) => String(item)).join(" | ");
 	}
 	if (typeof v === "object") return JSON.stringify(v);
