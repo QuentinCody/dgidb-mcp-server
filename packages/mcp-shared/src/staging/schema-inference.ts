@@ -78,6 +78,24 @@ export function detectArrays(
 
 	if (found.length > 0) return found;
 
+	// Handle single-key wrapper objects (common in GraphQL responses)
+	// e.g., { entry: { struct: {...}, exptl: [...] } } → unwrap and recurse
+	// Also handles nested wrappers like { genes: { nodes: [...] } }
+	const keys = Object.keys(obj);
+	if (keys.length === 1) {
+		const inner = obj[keys[0]];
+		if (Array.isArray(inner) && inner.length > 0) {
+			return [{ key: keys[0], rows: inner }];
+		}
+		if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+			// Recurse to unwrap nested wrappers (e.g., { genes: { nodes: [...] } })
+			const innerResult = detectArrays(inner);
+			if (innerResult.length > 0) return innerResult;
+			// Single object response — wrap in array for single-row table
+			return [{ key: keys[0], rows: [inner] }];
+		}
+	}
+
 	// Fall back to any top-level array property
 	for (const [key, value] of Object.entries(obj)) {
 		if (Array.isArray(value) && value.length > 0) {
@@ -511,8 +529,8 @@ export function materializeSchema(
 			.map((c) => `"${c.name}" ${c.type}`)
 			.join(", ");
 		const createSql = hasIdColumn
-			? `CREATE TABLE IF NOT EXISTS "${table.name}" (_rowid INTEGER PRIMARY KEY AUTOINCREMENT, ${colDefs})`
-			: `CREATE TABLE IF NOT EXISTS "${table.name}" (id INTEGER PRIMARY KEY AUTOINCREMENT, ${colDefs})`;
+			? `CREATE TABLE IF NOT EXISTS "${table.name}" (_rowid INTEGER PRIMARY KEY AUTOINCREMENT${colDefs ? `, ${colDefs}` : ""})`
+			: `CREATE TABLE IF NOT EXISTS "${table.name}" (id INTEGER PRIMARY KEY AUTOINCREMENT${colDefs ? `, ${colDefs}` : ""})`;
 		sql.exec(createSql);
 
 		for (const idx of table.indexes) {
@@ -587,8 +605,8 @@ export function materializeSchema(
 				.map((c) => `"${c.name}" ${c.type}`)
 				.join(", ");
 			const childCreateSql = hasChildId
-				? `CREATE TABLE IF NOT EXISTS "${childTable.name}" (_rowid INTEGER PRIMARY KEY AUTOINCREMENT, ${childColDefs})`
-				: `CREATE TABLE IF NOT EXISTS "${childTable.name}" (id INTEGER PRIMARY KEY AUTOINCREMENT, ${childColDefs})`;
+				? `CREATE TABLE IF NOT EXISTS "${childTable.name}" (_rowid INTEGER PRIMARY KEY AUTOINCREMENT${childColDefs ? `, ${childColDefs}` : ""})`
+				: `CREATE TABLE IF NOT EXISTS "${childTable.name}" (id INTEGER PRIMARY KEY AUTOINCREMENT${childColDefs ? `, ${childColDefs}` : ""})`;
 			sql.exec(childCreateSql);
 
 			for (const idx of childTable.indexes) {

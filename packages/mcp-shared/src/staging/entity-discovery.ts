@@ -83,9 +83,23 @@ export function isEntity(obj: unknown, config?: DomainConfig): boolean {
 			if (hasIndicators) return true;
 		}
 		if (fieldCount >= 2) {
-			return keys.some((key) => {
+			const hasScalar = keys.some((key) => {
 				const value = record[key];
 				return value !== null && typeof value !== "object";
+			});
+			if (hasScalar) return true;
+
+			// All fields are nested objects — still an entity if those objects
+			// contain scalar fields (common in GraphQL single-object responses
+			// like { struct: { title: "..." }, exptl: { method: "..." } })
+			return keys.some((key) => {
+				const value = record[key];
+				if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+					const nested = Object.values(value as Record<string, unknown>);
+					return nested.length > 0 && nested.length <= 10 &&
+						nested.every((v) => typeof v !== "object" || v === null);
+				}
+				return false;
 			});
 		}
 		return false;

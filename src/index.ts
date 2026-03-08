@@ -432,43 +432,6 @@ export default {
 			});
 		}
 
-		// Schema initialization endpoint
-		if (url.pathname === "/initialize-schema" && request.method === "POST") {
-			const globalDoId = env.JSON_TO_SQL_DO.idFromName("global-schema-config");
-			const stub = env.JSON_TO_SQL_DO.get(globalDoId);
-			const resp = await stub.fetch("http://do/initialize-schema", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: await request.text()
-			});
-			return new Response(await resp.text(), {
-				status: resp.status,
-				headers: { "Content-Type": "application/json" }
-			});
-		}
-
-		// Chunking stats endpoint
-		if (url.pathname === "/chunking-stats" && request.method === "GET") {
-			const globalDoId = env.JSON_TO_SQL_DO.idFromName("global-schema-config");
-			const stub = env.JSON_TO_SQL_DO.get(globalDoId);
-			const resp = await stub.fetch("http://do/chunking-stats");
-			return new Response(await resp.text(), {
-				status: resp.status,
-				headers: { "Content-Type": "application/json" }
-			});
-		}
-
-		// Chunking analysis endpoint
-		if (url.pathname === "/chunking-analysis" && request.method === "GET") {
-			const globalDoId = env.JSON_TO_SQL_DO.idFromName("global-schema-config");
-			const stub = env.JSON_TO_SQL_DO.get(globalDoId);
-			const resp = await stub.fetch("http://do/chunking-analysis");
-			return new Response(await resp.text(), {
-				status: resp.status,
-				headers: { "Content-Type": "application/json" }
-			});
-		}
-
 		return new Response(
 			`${API_CONFIG.name} - Available on /sse and /mcp endpoints`,
 			{ status: 404, headers: { "Content-Type": "text/plain" } }

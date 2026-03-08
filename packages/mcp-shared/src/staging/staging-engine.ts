@@ -165,6 +165,19 @@ function unwrapToArray(data: unknown): unknown[] | null {
 		if (Array.isArray(record[key])) return record[key] as unknown[];
 	}
 
+	// Handle single-key wrapper objects (common in GraphQL responses)
+	// Recurse to handle nested wrappers like { genes: { nodes: [...] } }
+	const allKeys = Object.keys(record);
+	if (allKeys.length === 1) {
+		const inner = record[allKeys[0]];
+		if (Array.isArray(inner)) return inner;
+		if (inner && typeof inner === "object") {
+			const unwrapped = unwrapToArray(inner);
+			if (unwrapped && unwrapped.length > 0) return unwrapped;
+			return [inner];
+		}
+	}
+
 	// Fall back to any top-level array
 	for (const value of Object.values(record)) {
 		if (Array.isArray(value) && value.length > 0) return value;

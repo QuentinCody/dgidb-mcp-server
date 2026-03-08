@@ -151,7 +151,10 @@ export async function queryDataFromDo(
 	];
 	const upperSql = sanitizedSql.toUpperCase();
 	for (const keyword of dangerousKeywords) {
-		if (upperSql.includes(keyword)) {
+		// Use word-boundary regex to avoid false positives on column names
+		// like "created_at" matching CREATE, "updated_at" matching UPDATE, etc.
+		const regex = new RegExp(`\\b${keyword}\\b`);
+		if (regex.test(upperSql)) {
 			throw new Error(
 				`SQL command '${keyword}' is not allowed. Only SELECT queries are permitted.`,
 			);
