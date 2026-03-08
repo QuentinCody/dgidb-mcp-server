@@ -16,10 +16,12 @@ import {
 	detectArrays,
 	inferSchema,
 	materializeSchema,
+	type InferredSchema,
 	type SchemaHints,
 } from "./schema-inference";
 import { stageData } from "./staging-engine";
 import type { DomainConfig, StagingContext, StagingHints } from "./types";
+import type { TableRelationship } from "./staging-metadata";
 
 export class RestStagingDO extends DurableObject {
 	protected chunking = new ChunkingEngine();
@@ -143,6 +145,45 @@ export class RestStagingDO extends DurableObject {
 		}
 	}
 
+	/**
+	 * Persist the inferred schema so handleSchema() can surface
+	 * relationships, jsonShape, and pipe-delimited column metadata.
+	 */
+	private persistInferredSchema(schema: InferredSchema): void {
+		try {
+			this.ctx.storage.sql.exec(
+				`CREATE TABLE IF NOT EXISTS _inferred_schema (
+					id INTEGER PRIMARY KEY,
+					schema_json TEXT
+				)`,
+			);
+			this.ctx.storage.sql.exec(
+				`INSERT OR REPLACE INTO _inferred_schema (id, schema_json) VALUES (1, ?)`,
+				JSON.stringify(schema),
+			);
+		} catch {
+			// Non-critical — schema still works via PRAGMA, just without enrichment
+		}
+	}
+
+	/**
+	 * Extract parent→child relationships from an InferredSchema.
+	 */
+	private extractRelationships(schema: InferredSchema): TableRelationship[] {
+		const relationships: TableRelationship[] = [];
+		for (const table of schema.tables) {
+			if (table.childOf) {
+				relationships.push({
+					child_table: table.name,
+					parent_table: table.childOf.parentTable,
+					fk_column: table.childOf.fkColumn,
+					source_column: table.childOf.sourceColumn,
+				});
+			}
+		}
+		return relationships;
+	}
+
 	private async handleProcess(request: Request): Promise<Response> {
 		const json = (await request.json()) as unknown;
 		const container = (json as Record<string, unknown>) || {};
@@ -187,6 +228,10 @@ export class RestStagingDO extends DurableObject {
 
 		if (arrays.length > 0 && arrays.some((a) => a.rows.length > 0)) {
 			const schema = inferSchema(arrays, hints);
+
+			// Persist inferred schema for enriched handleSchema() output
+			this.persistInferredSchema(schema);
+
 			const rowsMap = new Map<string, unknown[]>();
 			for (const arr of arrays) {
 				const tableName = hints?.tableName ?? arr.key.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
@@ -209,6 +254,9 @@ export class RestStagingDO extends DurableObject {
 				result.failedRows,
 				result.warnings,
 			);
+
+			// Extract relationships from schema
+			const relationships = this.extractRelationships(schema);
 
 			// Build staging warnings if data was lost
 			const stagingWarnings: Record<string, unknown> = {};
@@ -235,6 +283,7 @@ export class RestStagingDO extends DurableObject {
 				total_rows: result.totalRows,
 				input_rows: result.inputRows,
 				tables_created: result.tablesCreated,
+				...(relationships.length > 0 ? { relationships } : {}),
 				...(Object.keys(stagingWarnings).length > 0 ? { staging_warnings: stagingWarnings } : {}),
 			});
 		}
@@ -319,14 +368,50 @@ export class RestStagingDO extends DurableObject {
 					type: string;
 					not_null: boolean;
 					primary_key: boolean;
+					json_shape?: string;
+					searchable_array?: boolean;
 				}>;
 			}
 		> = {};
 		let totalRows = 0;
 
+		// Load persisted inferred schema for enrichment
+		let inferredSchema: InferredSchema | undefined;
+		try {
+			const schemaResults = this.ctx.storage.sql
+				.exec(`SELECT name FROM sqlite_master WHERE type='table' AND name = '_inferred_schema'`)
+				.toArray();
+			if (schemaResults.length > 0) {
+				const schemaRow = this.ctx.storage.sql
+					.exec(`SELECT schema_json FROM _inferred_schema WHERE id = 1`)
+					.one() as { schema_json: string } | undefined;
+				if (schemaRow?.schema_json) {
+					inferredSchema = JSON.parse(schemaRow.schema_json) as InferredSchema;
+				}
+			}
+		} catch {
+			// Non-critical — fall back to PRAGMA-only output
+		}
+
+		// Build column metadata lookup from inferred schema
+		const columnMeta = new Map<string, { jsonShape?: string; pipeDelimited?: boolean }>();
+		if (inferredSchema) {
+			for (const table of inferredSchema.tables) {
+				for (const col of table.columns) {
+					const key = `${table.name}.${col.name}`;
+					if (col.jsonShape || col.pipeDelimited) {
+						columnMeta.set(key, {
+							jsonShape: col.jsonShape,
+							pipeDelimited: col.pipeDelimited,
+						});
+					}
+				}
+			}
+		}
+
 		const tableResults = this.ctx.storage.sql
 			.exec(
-				`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != '_staging_metadata'`,
+				`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_staging_%' AND name != '_inferred_schema'`,
 			)
 			.toArray();
 
@@ -343,14 +428,37 @@ export class RestStagingDO extends DurableObject {
 
 			tables[tableName] = {
 				row_count: rowCount,
-				columns: columnResults.map((col: Record<string, unknown>) => ({
-					name: col.name as string,
-					type: col.type as string,
-					not_null: col.notnull === 1,
-					primary_key: col.pk === 1,
-				})),
+				columns: columnResults.map((col: Record<string, unknown>) => {
+					const colName = col.name as string;
+					const meta = columnMeta.get(`${tableName}.${colName}`);
+					return {
+						name: colName,
+						type: col.type as string,
+						not_null: col.notnull === 1,
+						primary_key: col.pk === 1,
+						...(meta?.jsonShape ? { json_shape: meta.jsonShape } : {}),
+						...(meta?.pipeDelimited ? { searchable_array: true } : {}),
+					};
+				}),
 			};
 		}
+
+		// Extract relationships from inferred schema
+		const relationships: TableRelationship[] = inferredSchema
+			? this.extractRelationships(inferredSchema)
+			: [];
+
+		// Generate sample JOIN SQL for each relationship
+		const relationshipsWithJoins = relationships.map((rel) => {
+			// Determine parent PK column: if parent has a data "id" column, PK is _rowid
+			const parentTable = inferredSchema?.tables.find((t) => t.name === rel.parent_table);
+			const parentHasDataId = parentTable?.columns.some((c) => c.name === "id") ?? false;
+			const parentKeyCol = parentHasDataId ? "_rowid" : "id";
+			return {
+				...rel,
+				join_sql: `SELECT p.*, c.* FROM "${rel.parent_table}" p JOIN "${rel.child_table}" c ON c.parent_id = p.${parentKeyCol}`,
+			};
+		});
 
 		// Include provenance metadata if available
 		let provenance: Record<string, unknown> | undefined;
@@ -376,6 +484,7 @@ export class RestStagingDO extends DurableObject {
 				table_count: Object.keys(tables).length,
 				total_rows: totalRows,
 				tables,
+				...(relationshipsWithJoins.length > 0 ? { relationships: relationshipsWithJoins } : {}),
 				metadata: {
 					timestamp: new Date().toISOString(),
 					...(provenance ? { provenance } : {}),

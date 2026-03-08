@@ -7,7 +7,7 @@ import {
 	createCodeModeError,
 } from "../codemode/response";
 import type { SchemaHints } from "./schema-inference";
-import { buildStagingMetadata, type StagingMetadata } from "./staging-metadata";
+import { buildStagingMetadata, type StagingMetadata, type TableRelationship } from "./staging-metadata";
 
 const DEFAULT_STAGING_THRESHOLD = 30 * 1024; // 30KB — stage larger responses into SQLite for compact schema summaries
 
@@ -87,6 +87,7 @@ export async function stageToDoAndRespond(
 		total_rows?: number;
 		input_rows?: number;
 		staging_warnings?: Record<string, unknown>;
+		relationships?: TableRelationship[];
 	};
 
 	if (!processResult.success) {
@@ -119,6 +120,7 @@ export async function stageToDoAndRespond(
 			totalRows: processResult.total_rows,
 			payloadSizeBytes: payloadBytes,
 			toolPrefix: resolvedToolPrefix,
+			relationships: processResult.relationships,
 		}),
 	};
 }

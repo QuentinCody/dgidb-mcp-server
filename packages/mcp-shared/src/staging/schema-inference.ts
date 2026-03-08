@@ -2,6 +2,12 @@
  * Universal Schema Inference Engine — JSON → SQLite converter for REST API responses.
  *
  * Deterministic: same input always produces same schema.
+ *
+ * Improvements over v1:
+ *   1. Large strings (>4KB) → TEXT (not JSON)
+ *   2. Arrays of scalars → pipe-delimited TEXT columns
+ *   3. Arrays of objects → child tables with parent_id FK
+ *   4. Remaining JSON columns carry jsonShape metadata
  */
 
 export interface SchemaHints {
@@ -10,17 +16,32 @@ export interface SchemaHints {
 	indexes?: string[];
 	flatten?: Record<string, number>;
 	exclude?: string[];
+	/** Columns to NOT extract as child tables — keep as JSON blobs */
+	skipChildTables?: string[];
 }
 
 export interface InferredColumn {
 	name: string;
 	type: "TEXT" | "INTEGER" | "REAL" | "JSON";
+	/** Shape description for JSON columns (e.g., "{version: number, flags: object}") */
+	jsonShape?: string;
+	/** True for TEXT columns that contain pipe-delimited scalar arrays (searchable with LIKE) */
+	pipeDelimited?: boolean;
+}
+
+/** Reference from a child table back to its parent */
+export interface ChildTableRef {
+	parentTable: string;
+	fkColumn: string; // column name in child table, always "parent_id"
+	sourceColumn: string; // column name in parent that contained the array
 }
 
 export interface InferredTable {
 	name: string;
 	columns: InferredColumn[];
 	indexes: string[];
+	/** Set on child tables extracted from arrays of objects */
+	childOf?: ChildTableRef;
 }
 
 export interface InferredSchema {
@@ -30,7 +51,8 @@ export interface InferredSchema {
 const KNOWN_ARRAY_KEYS = ["data", "results", "items", "records", "hits", "entries", "rows"];
 const ID_PATTERN = /^(id|.*_id|.*Id)$/;
 const MAX_SCAN_ROWS = 100;
-const LARGE_VALUE_THRESHOLD = 4096; // 4KB
+/** SQLite max columns safety limit — child tables exceeding this stay as JSON */
+const MAX_CHILD_TABLE_COLUMNS = 100;
 
 /**
  * Find the array(s) in a JSON response that should become tables.
@@ -69,7 +91,7 @@ export function detectArrays(
 /**
  * Flatten an object's keys with `_` separator up to a given depth.
  */
-function flattenObject(
+export function flattenObject(
 	obj: Record<string, unknown>,
 	maxDepth: number,
 	depthOverrides?: Record<string, number>,
@@ -106,13 +128,64 @@ function flattenObject(
 	return result;
 }
 
+// ---------------------------------------------------------------------------
+// Column type classification
+// ---------------------------------------------------------------------------
+
+/** Check if all non-null items in an array are scalars (not objects/arrays). */
+function isScalarArray(arr: unknown[]): boolean {
+	for (const item of arr) {
+		if (item === null || item === undefined) continue;
+		if (typeof item === "object") return false;
+	}
+	return true;
+}
+
+/** Check if all non-null items in an array are objects (not arrays/scalars). */
+function isObjectArray(arr: unknown[]): boolean {
+	let hasObject = false;
+	for (const item of arr) {
+		if (item === null || item === undefined) continue;
+		if (typeof item !== "object" || Array.isArray(item)) return false;
+		hasObject = true;
+	}
+	return hasObject;
+}
+
+/**
+ * Classify a column's values into one of:
+ *   - "scalar_array" — array of primitives → will become pipe-delimited TEXT
+ *   - "object_array" — array of objects → will become a child table
+ *   - "plain" — not an array column, use normal type inference
+ */
+type ArrayClassification = "scalar_array" | "object_array" | "plain";
+
+function classifyColumn(values: unknown[]): ArrayClassification {
+	const nonNull = values.filter((v) => v !== null && v !== undefined);
+	if (nonNull.length === 0) return "plain";
+
+	const arrayValues = nonNull.filter((v) => Array.isArray(v));
+	// At least 75% of non-null values must be arrays to classify as array column
+	if (arrayValues.length < nonNull.length * 0.75) return "plain";
+
+	// Sample from the first non-empty array
+	const sampleArr = arrayValues.find(
+		(a) => (a as unknown[]).length > 0,
+	) as unknown[] | undefined;
+	if (!sampleArr || sampleArr.length === 0) return "scalar_array"; // all empty arrays
+
+	if (isObjectArray(sampleArr)) return "object_array";
+	if (isScalarArray(sampleArr)) return "scalar_array";
+	return "plain"; // mixed or nested arrays — keep as JSON
+}
+
 /**
  * Infer the SQLite column type from sampled values.
+ * Fix: large strings are TEXT, not JSON. Only actual objects get JSON type.
  */
 function inferColumnType(values: unknown[]): "TEXT" | "INTEGER" | "REAL" | "JSON" {
 	let hasInteger = false;
 	let hasReal = false;
-	let hasLargeString = false;
 	let hasObject = false;
 
 	for (const v of values) {
@@ -124,19 +197,141 @@ function inferColumnType(values: unknown[]): "TEXT" | "INTEGER" | "REAL" | "JSON
 			hasInteger = true;
 		} else if (typeof v === "object") {
 			hasObject = true;
-		} else if (typeof v === "string" && v.length > LARGE_VALUE_THRESHOLD) {
-			hasLargeString = true;
 		}
+		// Large strings are just TEXT — no special JSON classification
 	}
 
-	if (hasObject || hasLargeString) return "JSON";
+	if (hasObject) return "JSON";
 	if (hasReal) return "REAL";
 	if (hasInteger && !hasReal) return "INTEGER";
 	return "TEXT";
 }
 
 /**
+ * Build a jsonShape descriptor from sampled object values.
+ * Returns a compact representation like "{version: number, flags: object}".
+ */
+function buildJsonShape(values: unknown[]): string | undefined {
+	const objectValues = values.filter(
+		(v) => v !== null && typeof v === "object" && !Array.isArray(v),
+	) as Record<string, unknown>[];
+	if (objectValues.length === 0) return undefined;
+
+	// Union keys from all sampled objects
+	const keyTypes = new Map<string, Set<string>>();
+	for (const obj of objectValues.slice(0, 10)) {
+		for (const [k, v] of Object.entries(obj)) {
+			if (!keyTypes.has(k)) keyTypes.set(k, new Set());
+			if (v === null || v === undefined) keyTypes.get(k)!.add("null");
+			else if (Array.isArray(v)) keyTypes.get(k)!.add("array");
+			else keyTypes.get(k)!.add(typeof v);
+		}
+	}
+
+	const parts: string[] = [];
+	for (const [k, types] of keyTypes) {
+		const typeStr = [...types].join("|");
+		parts.push(`${k}: ${typeStr}`);
+	}
+	return `{${parts.join(", ")}}`;
+}
+
+/**
+ * Infer a child table schema from sampled array-of-object values.
+ */
+function inferChildTableSchema(
+	parentTableName: string,
+	sourceColumn: string,
+	values: unknown[],
+): InferredTable {
+	const childTableName = `${parentTableName}_${sourceColumn}`;
+
+	// Collect all items from all arrays for this column
+	const allItems: Record<string, unknown>[] = [];
+	for (const v of values) {
+		if (!Array.isArray(v)) continue;
+		for (const item of v) {
+			if (item !== null && typeof item === "object" && !Array.isArray(item)) {
+				allItems.push(item as Record<string, unknown>);
+			}
+		}
+	}
+
+	if (allItems.length === 0) {
+		return {
+			name: childTableName,
+			columns: [{ name: "parent_id", type: "INTEGER" }],
+			indexes: ["parent_id"],
+			childOf: { parentTable: parentTableName, fkColumn: "parent_id", sourceColumn },
+		};
+	}
+
+	// Flatten child items to depth 1 (no deep nesting in child tables)
+	const sampleItems = allItems.slice(0, MAX_SCAN_ROWS);
+	const flatItems = sampleItems.map((item) => flattenObject(item, 1));
+
+	// Collect column values
+	const columnValues = new Map<string, unknown[]>();
+	for (const flat of flatItems) {
+		for (const [col, val] of Object.entries(flat)) {
+			if (!columnValues.has(col)) columnValues.set(col, []);
+			columnValues.get(col)!.push(val);
+		}
+	}
+
+	// Build child columns — parent_id first
+	const columns: InferredColumn[] = [{ name: "parent_id", type: "INTEGER" }];
+	const indexes: string[] = ["parent_id"];
+
+	for (const [colName, colValues] of columnValues) {
+		// Classify child column values (scalar arrays get unwound, but we don't recurse into object arrays)
+		const classification = classifyColumn(colValues);
+		let type: InferredColumn["type"];
+		let jsonShape: string | undefined;
+		let isPipeDelimited = false;
+
+		if (classification === "scalar_array") {
+			type = "TEXT";
+			isPipeDelimited = true;
+		} else {
+			type = inferColumnType(colValues);
+			if (type === "JSON") {
+				jsonShape = buildJsonShape(colValues);
+			}
+		}
+
+		columns.push({
+			name: colName,
+			type,
+			...(jsonShape ? { jsonShape } : {}),
+			...(isPipeDelimited ? { pipeDelimited: true } : {}),
+		});
+
+		if (ID_PATTERN.test(colName) && !indexes.includes(colName)) {
+			indexes.push(colName);
+		}
+	}
+
+	return {
+		name: childTableName,
+		columns,
+		indexes,
+		childOf: { parentTable: parentTableName, fkColumn: "parent_id", sourceColumn },
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Schema inference
+// ---------------------------------------------------------------------------
+
+/**
  * Infer a complete schema from detected arrays.
+ *
+ * Improvements:
+ * - Arrays of objects → extracted as child tables with parent_id FK
+ * - Arrays of scalars → marked as TEXT (materialization joins with " | ")
+ * - Large strings → TEXT (not JSON)
+ * - Remaining JSON columns get jsonShape metadata
  */
 export function inferSchema(
 	arrays: Array<{ key: string; rows: unknown[] }>,
@@ -144,6 +339,7 @@ export function inferSchema(
 ): InferredSchema {
 	const tables: InferredTable[] = [];
 	const exclude = new Set(hints?.exclude ?? []);
+	const skipChildTables = new Set(hints?.skipChildTables ?? []);
 
 	for (const { key, rows } of arrays) {
 		if (rows.length === 0) continue;
@@ -167,16 +363,62 @@ export function inferSchema(
 			}
 		}
 
-		// Build columns
+		// First pass: classify columns and extract child tables
+		const childTables: InferredTable[] = [];
+		const childSourceColumns = new Set<string>();
+
+		for (const [colName, values] of columnValues) {
+			if (skipChildTables.has(colName)) continue;
+
+			const classification = classifyColumn(values);
+			if (classification === "object_array") {
+				const childTable = inferChildTableSchema(tableName, colName, values);
+				// Safety: if child objects are too complex (too many columns),
+				// skip extraction and keep the column as JSON in the parent
+				if (childTable.columns.length <= MAX_CHILD_TABLE_COLUMNS) {
+					childTables.push(childTable);
+					childSourceColumns.add(colName);
+				}
+			}
+		}
+
+		// Second pass: build parent columns (excluding child-extracted columns)
 		const columns: InferredColumn[] = [];
 		const indexes: string[] = [...(hints?.indexes ?? [])];
 
 		for (const [colName, values] of columnValues) {
+			// Skip columns that became child tables
+			if (childSourceColumns.has(colName)) continue;
+
 			const overrideType = hints?.columnTypes?.[colName];
-			const type = overrideType
-				? (overrideType as InferredColumn["type"])
-				: inferColumnType(values);
-			columns.push({ name: colName, type });
+			let type: InferredColumn["type"];
+			let jsonShape: string | undefined;
+
+			let isPipeDelimited = false;
+
+			if (overrideType) {
+				type = overrideType as InferredColumn["type"];
+			} else {
+				const classification = classifyColumn(values);
+				if (classification === "scalar_array") {
+					type = "TEXT";
+					isPipeDelimited = true;
+				} else {
+					type = inferColumnType(values);
+				}
+			}
+
+			// Add jsonShape for JSON columns
+			if (type === "JSON") {
+				jsonShape = buildJsonShape(values);
+			}
+
+			columns.push({
+				name: colName,
+				type,
+				...(jsonShape ? { jsonShape } : {}),
+				...(isPipeDelimited ? { pipeDelimited: true } : {}),
+			});
 
 			// Auto-index ID columns
 			if (ID_PATTERN.test(colName) && !indexes.includes(colName)) {
@@ -185,6 +427,8 @@ export function inferSchema(
 		}
 
 		tables.push({ name: tableName, columns, indexes });
+		// Append child tables after parent
+		tables.push(...childTables);
 	}
 
 	return { tables };
@@ -212,7 +456,29 @@ export interface MaterializationResult {
 }
 
 /**
+ * Convert a value for SQL insertion.
+ * - Arrays of scalars → pipe-delimited string
+ * - Objects/remaining arrays → JSON.stringify
+ * - null/undefined → null
+ * - Scalars → as-is
+ */
+function sqlValue(v: unknown): unknown {
+	if (v === null || v === undefined) return null;
+	if (Array.isArray(v)) {
+		// Scalar array → pipe-delimited
+		if (v.length === 0) return null;
+		return v.map((item) => String(item)).join(" | ");
+	}
+	if (typeof v === "object") return JSON.stringify(v);
+	return v;
+}
+
+/**
  * Generate CREATE TABLE + INSERT statements and execute them.
+ *
+ * Handles parent/child table relationships:
+ * - Parent tables are processed first, tracking row IDs
+ * - Child tables are populated by extracting arrays from parent row data
  */
 export function materializeSchema(
 	schema: InferredSchema,
@@ -220,6 +486,7 @@ export function materializeSchema(
 	sql: {
 		exec: (query: string, ...bindings: unknown[]) => unknown;
 	},
+	hints?: SchemaHints,
 ): MaterializationResult {
 	const tablesCreated: string[] = [];
 	let totalRows = 0;
@@ -228,9 +495,17 @@ export function materializeSchema(
 	const warnings: MaterializationWarning[] = [];
 	const MAX_SAMPLE_ERRORS = 10;
 
-	for (const table of schema.tables) {
-		// If data already has an 'id' column, use _rowid as the synthetic PK
-		// to avoid "duplicate column name: id" errors
+	// Separate parent and child tables
+	const parentTables = schema.tables.filter((t) => !t.childOf);
+	const childTablesByParent = new Map<string, InferredTable[]>();
+	for (const ct of schema.tables.filter((t) => t.childOf)) {
+		const parentName = ct.childOf!.parentTable;
+		if (!childTablesByParent.has(parentName)) childTablesByParent.set(parentName, []);
+		childTablesByParent.get(parentName)!.push(ct);
+	}
+
+	for (const table of parentTables) {
+		// --- Create parent table ---
 		const hasIdColumn = table.columns.some((c) => c.name === "id");
 		const colDefs = table.columns
 			.map((c) => `"${c.name}" ${c.type}`)
@@ -252,20 +527,44 @@ export function materializeSchema(
 		const placeholders = colNames.map(() => "?").join(", ");
 		const insertSql = `INSERT INTO "${table.name}" (${colNames.map((n) => `"${n}"`).join(", ")}) VALUES (${placeholders})`;
 
+		// Child tables for this parent
+		const myChildTables = childTablesByParent.get(table.name) ?? [];
+		const childSourceCols = new Set(myChildTables.map((ct) => ct.childOf!.sourceColumn));
+
+		// Track parent IDs and capture child arrays
+		const parentIdMap = new Map<number, number>(); // rowIndex → auto-increment ID
+		const capturedChildData = new Map<string, Array<{ parentIndex: number; items: unknown[] }>>();
+		for (const ct of myChildTables) {
+			capturedChildData.set(ct.name, []);
+		}
+		let nextParentId = 1;
+
+		// --- Insert parent rows ---
 		for (let i = 0; i < tableRows.length; i++) {
 			const row = tableRows[i];
 			const flat =
 				typeof row === "object" && row !== null
-					? flattenObject(row as Record<string, unknown>, 2)
+					? flattenObject(row as Record<string, unknown>, 2, hints?.flatten)
 					: { value: row };
+
+			// Capture child array data before inserting parent
+			for (const ct of myChildTables) {
+				const sourceCol = ct.childOf!.sourceColumn;
+				const arr = (flat as Record<string, unknown>)[sourceCol];
+				if (Array.isArray(arr) && arr.length > 0) {
+					capturedChildData.get(ct.name)!.push({ parentIndex: i, items: arr });
+				}
+			}
+
+			// Build parent values (excluding child source columns)
 			const values = colNames.map((col) => {
 				const v = (flat as Record<string, unknown>)[col];
-				if (v === null || v === undefined) return null;
-				if (typeof v === "object") return JSON.stringify(v);
-				return v;
+				return sqlValue(v);
 			});
+
 			try {
 				sql.exec(insertSql, ...values);
+				parentIdMap.set(i, nextParentId++);
 				totalRows++;
 			} catch (err) {
 				failedRows++;
@@ -280,6 +579,64 @@ export function materializeSchema(
 		}
 
 		tablesCreated.push(table.name);
+
+		// --- Create and populate child tables ---
+		for (const childTable of myChildTables) {
+			const hasChildId = childTable.columns.some((c) => c.name === "id");
+			const childColDefs = childTable.columns
+				.map((c) => `"${c.name}" ${c.type}`)
+				.join(", ");
+			const childCreateSql = hasChildId
+				? `CREATE TABLE IF NOT EXISTS "${childTable.name}" (_rowid INTEGER PRIMARY KEY AUTOINCREMENT, ${childColDefs})`
+				: `CREATE TABLE IF NOT EXISTS "${childTable.name}" (id INTEGER PRIMARY KEY AUTOINCREMENT, ${childColDefs})`;
+			sql.exec(childCreateSql);
+
+			for (const idx of childTable.indexes) {
+				sql.exec(
+					`CREATE INDEX IF NOT EXISTS "idx_${childTable.name}_${idx}" ON "${childTable.name}"("${idx}")`,
+				);
+			}
+
+			const childColNames = childTable.columns.map((c) => c.name);
+			const childPlaceholders = childColNames.map(() => "?").join(", ");
+			const childInsertSql = `INSERT INTO "${childTable.name}" (${childColNames.map((n) => `"${n}"`).join(", ")}) VALUES (${childPlaceholders})`;
+
+			const captured = capturedChildData.get(childTable.name) ?? [];
+			for (const { parentIndex, items } of captured) {
+				const parentId = parentIdMap.get(parentIndex);
+				if (parentId === undefined) continue; // parent failed to insert
+
+				for (let j = 0; j < items.length; j++) {
+					const item = items[j];
+					const childFlat =
+						item !== null && typeof item === "object" && !Array.isArray(item)
+							? flattenObject(item as Record<string, unknown>, 1)
+							: { value: item };
+
+					const childValues = childColNames.map((col) => {
+						if (col === "parent_id") return parentId;
+						const v = (childFlat as Record<string, unknown>)[col];
+						return sqlValue(v);
+					});
+
+					try {
+						sql.exec(childInsertSql, ...childValues);
+						totalRows++;
+					} catch (err) {
+						failedRows++;
+						if (warnings.length < MAX_SAMPLE_ERRORS) {
+							warnings.push({
+								rowIndex: j,
+								table: childTable.name,
+								error: err instanceof Error ? err.message : String(err),
+							});
+						}
+					}
+				}
+			}
+
+			tablesCreated.push(childTable.name);
+		}
 	}
 
 	return { tablesCreated, totalRows, inputRows, failedRows, warnings };

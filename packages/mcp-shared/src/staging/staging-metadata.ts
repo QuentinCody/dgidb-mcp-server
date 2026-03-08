@@ -6,6 +6,16 @@
  * models can reliably detect and use staged data without regex parsing.
  */
 
+/** Describes a parent→child table relationship created by child table extraction */
+export interface TableRelationship {
+	child_table: string;
+	parent_table: string;
+	/** Column in child table referencing parent (always "parent_id") */
+	fk_column: string;
+	/** Column in parent that contained the source array */
+	source_column: string;
+}
+
 export interface StagingMetadata {
 	/** Always true — discriminant for detection */
 	staged: true;
@@ -23,6 +33,8 @@ export interface StagingMetadata {
 	query_tool: string;
 	/** Tool name for inspecting schema (e.g. "ctgov_get_schema") */
 	schema_tool: string;
+	/** Parent→child table relationships (from child table extraction) */
+	relationships?: TableRelationship[];
 }
 
 /**
@@ -35,6 +47,7 @@ export function buildStagingMetadata(opts: {
 	totalRows?: number;
 	payloadSizeBytes?: number;
 	toolPrefix: string;
+	relationships?: TableRelationship[];
 }): StagingMetadata {
 	return {
 		staged: true,
@@ -45,5 +58,8 @@ export function buildStagingMetadata(opts: {
 		payload_size_bytes: opts.payloadSizeBytes,
 		query_tool: `${opts.toolPrefix}_query_data`,
 		schema_tool: `${opts.toolPrefix}_get_schema`,
+		...(opts.relationships && opts.relationships.length > 0
+			? { relationships: opts.relationships }
+			: {}),
 	};
 }
