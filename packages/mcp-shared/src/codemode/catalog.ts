@@ -27,6 +27,8 @@ export interface ApiEndpoint {
 	response?: { description?: string; example?: unknown };
 	/** Links to an existing hand-built MCP tool that covers this endpoint */
 	coveredByTool?: string;
+	/** Marks the endpoint as deprecated/discontinued — AI should avoid using it */
+	deprecated?: boolean;
 }
 
 export interface ApiCatalog {
