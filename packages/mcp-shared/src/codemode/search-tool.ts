@@ -1,18 +1,28 @@
 /**
  * Search tool factory — creates a `<prefix>_search` tool for API discovery.
  *
- * Runs in-process (no V8 isolate needed) — just queries the static catalog.
- * Returns matching endpoints with full parameter documentation.
+ * Two modes:
+ * 1. **Catalog mode** (legacy) — runs in-process keyword search over a static ApiCatalog.
+ * 2. **OpenAPI mode** (new) — evaluates agent-written JS with the full resolved
+ *    OpenAPI spec available. The agent can search paths, list tags, describe
+ *    operations, etc., using injected helper functions.
+ *
+ * When `openApiSpec` is provided, the tool switches to OpenAPI mode.
+ * When only `catalog` is provided, the tool uses the original catalog mode.
  */
 
 import { z } from "zod";
 import type { ApiCatalog, ApiEndpoint } from "./catalog";
+import type { ResolvedSpec } from "./openapi-resolver";
+import { buildOpenApiSearchSource } from "./openapi-search";
 
 export interface SearchToolOptions {
 	/** Tool name prefix (e.g., "gtex" → "gtex_search") */
 	prefix: string;
-	/** The API catalog to search */
-	catalog: ApiCatalog;
+	/** The API catalog to search (legacy mode) */
+	catalog?: ApiCatalog;
+	/** Resolved OpenAPI spec for code-execution search (new mode) */
+	openApiSpec?: ResolvedSpec;
 }
 
 /**
@@ -83,11 +93,138 @@ function formatEndpoint(ep: ApiEndpoint): string {
 }
 
 /**
- * Create a search tool registration object.
- * Returns { name, description, schema, register } for the server to use.
+ * Count the total number of operations in a resolved OpenAPI spec.
  */
-export function createSearchTool(options: SearchToolOptions) {
-	const { prefix, catalog } = options;
+function countSpecOperations(spec: ResolvedSpec): number {
+	const methods = ["get", "post", "put", "delete", "patch", "options", "head", "trace"];
+	let count = 0;
+	for (const pathItem of Object.values(spec.paths)) {
+		if (!pathItem || typeof pathItem !== "object") continue;
+		for (const method of methods) {
+			if ((pathItem as Record<string, unknown>)[method]) count++;
+		}
+	}
+	return count;
+}
+
+/**
+ * Create a search tool in OpenAPI mode.
+ *
+ * The tool accepts a `code` parameter — agent-written JavaScript that runs
+ * with the full resolved OpenAPI spec and helper functions (searchPaths,
+ * listTags, getOperation, describeOperation) available.
+ */
+function createOpenApiSearchTool(prefix: string, spec: ResolvedSpec) {
+	const toolName = `${prefix}_search`;
+	const operationCount = countSpecOperations(spec);
+	const specJson = JSON.stringify(spec);
+
+	return {
+		name: toolName,
+		description:
+			`Search the ${spec.info.title} API (${operationCount} operations across ${Object.keys(spec.paths).length} paths). ` +
+			`Write JavaScript code to search the OpenAPI spec. Available functions:\n\n` +
+			`- searchPaths(query, maxResults=10) — keyword search across paths, summaries, tags, parameters\n` +
+			`- listTags() — list all tags with operation counts\n` +
+			`- getOperation(idOrPath) — get full operation by operationId or path\n` +
+			`- describeOperation(idOrPath) — formatted documentation for an operation\n` +
+			`- spec — the full frozen OpenAPI spec object (spec.paths, spec.info, etc.)\n\n` +
+			`Use ${prefix}_search to discover endpoints, then write code in ${prefix}_execute to call them.\n\n` +
+			`USAGE IN ${prefix}_execute:\n` +
+			`- api.get(path, params) for GET, api.post(path, body, params) for POST\n` +
+			`- Path params like /lookup/{id} are auto-interpolated from params\n` +
+			`- Large responses (>100KB) are auto-staged; use ${prefix}_query_data to explore`,
+		schema: {
+			code: z.string().describe(
+				"JavaScript code to search the API spec. Use searchPaths(), listTags(), " +
+				"getOperation(), describeOperation(), or access spec.paths directly. " +
+				'Examples: \'return searchPaths("studies")\', \'return listTags()\', ' +
+				'\'return describeOperation("getStudies")\'',
+			),
+		},
+
+		register(server: { tool: (...args: unknown[]) => void }) {
+			const description = this.description;
+			const schema = this.schema;
+
+			server.tool(toolName, description, schema, async (input: { code: string }) => {
+				const code = input.code?.trim() || "";
+
+				if (!code) {
+					return {
+						content: [{
+							type: "text" as const,
+							text: "No code provided. Use searchPaths(query), listTags(), " +
+								"getOperation(id), or describeOperation(id) to search the API spec.",
+						}],
+						structuredContent: {
+							success: true,
+							data: {
+								hint: "Provide JavaScript code to search the spec.",
+								available_functions: [
+									"searchPaths(query, maxResults)",
+									"listTags()",
+									"getOperation(idOrPath)",
+									"describeOperation(idOrPath)",
+								],
+								operation_count: operationCount,
+							},
+						},
+					};
+				}
+
+				try {
+					// Build the search helpers source and wrap user code
+					const searchSource = buildOpenApiSearchSource(specJson);
+					const wrappedCode = `${searchSource}\n${code}`;
+
+					// Evaluate using new Function() — same sandboxing approach
+					// as catalog-search tests. The V8 isolate integration comes
+					// later when wired to DynamicWorkerExecutor.
+					const fn = new Function(wrappedCode);
+					const result = fn();
+
+					// Format the result for display
+					let textOutput: string;
+					if (typeof result === "string") {
+						textOutput = result;
+					} else {
+						textOutput = JSON.stringify(result, null, 2);
+					}
+
+					return {
+						content: [{ type: "text" as const, text: textOutput }],
+						structuredContent: {
+							success: true,
+							data: result,
+						},
+					};
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					return {
+						content: [{
+							type: "text" as const,
+							text: `Search code error: ${message}`,
+						}],
+						structuredContent: {
+							success: false,
+							error: { code: "SEARCH_ERROR", message },
+						},
+						isError: true,
+					};
+				}
+			});
+		},
+	};
+}
+
+/**
+ * Create a search tool in catalog mode (legacy).
+ *
+ * The tool accepts query/category/max_results parameters and performs
+ * keyword-based search over the static ApiCatalog.
+ */
+function createCatalogSearchTool(prefix: string, catalog: ApiCatalog) {
 	const toolName = `${prefix}_search`;
 
 	// Collect categories for the description
@@ -126,9 +263,6 @@ export function createSearchTool(options: SearchToolOptions) {
 			),
 		},
 
-		/**
-		 * Register this tool with the MCP server.
-		 */
 		register(server: { tool: (...args: unknown[]) => void }) {
 			server.tool(
 				toolName,
@@ -192,4 +326,25 @@ export function createSearchTool(options: SearchToolOptions) {
 			);
 		},
 	};
+}
+
+/**
+ * Create a search tool registration object.
+ * Returns { name, description, schema, register } for the server to use.
+ *
+ * When `openApiSpec` is provided, creates a code-execution search tool.
+ * When only `catalog` is provided, creates a keyword search tool (legacy).
+ */
+export function createSearchTool(options: SearchToolOptions) {
+	const { prefix, catalog, openApiSpec } = options;
+
+	if (openApiSpec) {
+		return createOpenApiSearchTool(prefix, openApiSpec);
+	}
+
+	if (catalog) {
+		return createCatalogSearchTool(prefix, catalog);
+	}
+
+	throw new Error("createSearchTool requires either 'catalog' or 'openApiSpec'");
 }

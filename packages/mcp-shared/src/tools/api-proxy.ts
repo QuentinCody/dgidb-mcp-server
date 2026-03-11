@@ -51,6 +51,35 @@ function interpolatePath(
 	return { path: interpolated, queryParams };
 }
 
+/** Max size (bytes) for a single property to be preserved in the staging envelope. */
+const ENVELOPE_SCALAR_LIMIT = 1024;
+
+/**
+ * Copy small scalar properties from the original API response onto the
+ * staging metadata object. This preserves values like `.count`, `.total`,
+ * `.schema`, `.paging_info` so LLM code can read them without an extra
+ * round-trip (ADR-004 Option C).
+ */
+function preserveEnvelopeScalars(
+	original: unknown,
+	staging: Record<string, unknown>,
+): void {
+	if (!original || typeof original !== "object" || Array.isArray(original)) {
+		return;
+	}
+	for (const [key, value] of Object.entries(original as Record<string, unknown>)) {
+		if (key in staging) continue; // don't clobber staging metadata fields
+		try {
+			const serialized = JSON.stringify(value);
+			if (serialized !== undefined && serialized.length <= ENVELOPE_SCALAR_LIMIT) {
+				staging[key] = value;
+			}
+		} catch {
+			// Skip non-serializable values
+		}
+	}
+}
+
 export interface ApiProxyToolOptions {
 	apiFetch: ApiFetchFn;
 	/** DO namespace for auto-staging large responses */
@@ -111,7 +140,7 @@ export function createApiProxyTool(options: ApiProxyToolOptions): ToolEntry {
 						undefined,
 						stagingPrefix,
 					);
-					return {
+					const response: Record<string, unknown> = {
 						__staged: true,
 						data_access_id: staged.dataAccessId,
 						schema: staged.schema,
@@ -120,6 +149,10 @@ export function createApiProxyTool(options: ApiProxyToolOptions): ToolEntry {
 						_staging: staged._staging,
 						message: `Response auto-staged (${(responseBytes / 1024).toFixed(1)}KB). Use query() or the query_data tool with data_access_id="${staged.dataAccessId}" to explore the data.`,
 					};
+
+					preserveEnvelopeScalars(result.data, response);
+
+					return response;
 				}
 
 				return result.data;

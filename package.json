@@ -20,7 +20,7 @@
     "@bio-mcp/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "1.25.1",
     "agents": "^0.2.34",
-    "zod": "^3.24.2"
+    "zod": "^4.3.6"
   },
   "overrides": {
     "@modelcontextprotocol/sdk": "1.25.1"

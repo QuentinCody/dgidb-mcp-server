@@ -18,6 +18,8 @@ export interface SchemaHints {
 	exclude?: string[];
 	/** Columns to NOT extract as child tables — keep as JSON blobs */
 	skipChildTables?: string[];
+	/** Max depth for recursive child table extraction (default 2: parent → child → grandchild) */
+	maxRecursionDepth?: number;
 }
 
 export interface InferredColumn {
@@ -53,6 +55,8 @@ const ID_PATTERN = /^(id|.*_id|.*Id)$/;
 const MAX_SCAN_ROWS = 100;
 /** SQLite max columns safety limit — child tables exceeding this stay as JSON */
 const MAX_CHILD_TABLE_COLUMNS = 100;
+/** Default max recursion depth for child table extraction (parent=0 → child=1 → grandchild=2) */
+const DEFAULT_MAX_RECURSION_DEPTH = 2;
 
 /**
  * Find the array(s) in a JSON response that should become tables.
@@ -256,12 +260,21 @@ function buildJsonShape(values: unknown[]): string | undefined {
 
 /**
  * Infer a child table schema from sampled array-of-object values.
+ *
+ * Recursively extracts grandchild tables when child columns contain object arrays,
+ * up to `maxRecursionDepth` levels deep.
+ *
+ * @param depth Current recursion depth (0 = top-level child, 1 = grandchild, etc.)
+ * @param maxRecursionDepth Max depth for recursive extraction (default DEFAULT_MAX_RECURSION_DEPTH)
+ * @returns Array of InferredTable — the child table plus any grandchild tables
  */
 function inferChildTableSchema(
 	parentTableName: string,
 	sourceColumn: string,
 	values: unknown[],
-): InferredTable {
+	depth = 0,
+	maxRecursionDepth = DEFAULT_MAX_RECURSION_DEPTH,
+): InferredTable[] {
 	const childTableName = `${parentTableName}_${sourceColumn}`;
 
 	// Collect all items from all arrays for this column
@@ -276,12 +289,12 @@ function inferChildTableSchema(
 	}
 
 	if (allItems.length === 0) {
-		return {
+		return [{
 			name: childTableName,
 			columns: [{ name: "parent_id", type: "INTEGER" }],
 			indexes: ["parent_id"],
 			childOf: { parentTable: parentTableName, fkColumn: "parent_id", sourceColumn },
-		};
+		}];
 	}
 
 	// Flatten child items to depth 1 (no deep nesting in child tables)
@@ -300,10 +313,31 @@ function inferChildTableSchema(
 	// Build child columns — parent_id first
 	const columns: InferredColumn[] = [{ name: "parent_id", type: "INTEGER" }];
 	const indexes: string[] = ["parent_id"];
+	const grandchildTables: InferredTable[] = [];
+	const extractedColumns = new Set<string>();
 
 	for (const [colName, colValues] of columnValues) {
-		// Classify child column values (scalar arrays get unwound, but we don't recurse into object arrays)
 		const classification = classifyColumn(colValues);
+
+		// Recurse into object arrays if we haven't hit the depth limit
+		if (classification === "object_array" && depth + 1 < maxRecursionDepth) {
+			const grandchildResults = inferChildTableSchema(
+				childTableName,
+				colName,
+				colValues,
+				depth + 1,
+				maxRecursionDepth,
+			);
+			// Check column count safety valve on the immediate grandchild table
+			const immediateGrandchild = grandchildResults[0];
+			if (immediateGrandchild.columns.length <= MAX_CHILD_TABLE_COLUMNS) {
+				grandchildTables.push(...grandchildResults);
+				extractedColumns.add(colName);
+				continue; // Don't add this column to the child table
+			}
+			// Falls through to add as JSON column if too many columns
+		}
+
 		let type: InferredColumn["type"];
 		let jsonShape: string | undefined;
 		let isPipeDelimited = false;
@@ -330,12 +364,14 @@ function inferChildTableSchema(
 		}
 	}
 
-	return {
+	const childTable: InferredTable = {
 		name: childTableName,
 		columns,
 		indexes,
 		childOf: { parentTable: parentTableName, fkColumn: "parent_id", sourceColumn },
 	};
+
+	return [childTable, ...grandchildTables];
 }
 
 // ---------------------------------------------------------------------------
@@ -384,17 +420,19 @@ export function inferSchema(
 		// First pass: classify columns and extract child tables
 		const childTables: InferredTable[] = [];
 		const childSourceColumns = new Set<string>();
+		const maxRecursionDepth = hints?.maxRecursionDepth ?? DEFAULT_MAX_RECURSION_DEPTH;
 
 		for (const [colName, values] of columnValues) {
 			if (skipChildTables.has(colName)) continue;
 
 			const classification = classifyColumn(values);
 			if (classification === "object_array") {
-				const childTable = inferChildTableSchema(tableName, colName, values);
+				const childTableResults = inferChildTableSchema(tableName, colName, values, 0, maxRecursionDepth);
 				// Safety: if child objects are too complex (too many columns),
 				// skip extraction and keep the column as JSON in the parent
-				if (childTable.columns.length <= MAX_CHILD_TABLE_COLUMNS) {
-					childTables.push(childTable);
+				const immediateChild = childTableResults[0];
+				if (immediateChild.columns.length <= MAX_CHILD_TABLE_COLUMNS) {
+					childTables.push(...childTableResults);
 					childSourceColumns.add(colName);
 				}
 			}
@@ -499,9 +537,9 @@ function sqlValue(v: unknown): unknown {
 /**
  * Generate CREATE TABLE + INSERT statements and execute them.
  *
- * Handles parent/child table relationships:
- * - Parent tables are processed first, tracking row IDs
- * - Child tables are populated by extracting arrays from parent row data
+ * Handles parent/child/grandchild table relationships:
+ * - Tables are processed in topological order (parent before child before grandchild)
+ * - Each level tracks row IDs for FK resolution at the next level
  */
 export function materializeSchema(
 	schema: InferredSchema,
@@ -518,8 +556,7 @@ export function materializeSchema(
 	const warnings: MaterializationWarning[] = [];
 	const MAX_SAMPLE_ERRORS = 10;
 
-	// Separate parent and child tables
-	const parentTables = schema.tables.filter((t) => !t.childOf);
+	// Build child tables index: parentName → immediate children
 	const childTablesByParent = new Map<string, InferredTable[]>();
 	for (const ct of schema.tables.filter((t) => t.childOf)) {
 		const parentName = ct.childOf!.parentTable;
@@ -527,8 +564,23 @@ export function materializeSchema(
 		childTablesByParent.get(parentName)!.push(ct);
 	}
 
-	for (const table of parentTables) {
-		// --- Create parent table ---
+	// Track auto-increment IDs per table for FK resolution across levels
+	const tableIdMaps = new Map<string, Map<number, number>>();
+
+	/**
+	 * Create a table, insert rows, track IDs, then recurse into child tables.
+	 * @param table The table schema to materialize
+	 * @param tableRows Array of raw row data to insert
+	 * @param flattenDepth Depth for flattenObject (2 for parent, 1 for children)
+	 * @param parentIdMap Map from row index → parent auto-increment ID (undefined for root tables)
+	 */
+	function materializeTable(
+		table: InferredTable,
+		tableRows: unknown[],
+		flattenDepth: number,
+		parentIdMap?: Map<number, number>,
+	): void {
+		// --- Create table ---
 		const hasIdColumn = table.columns.some((c) => c.name === "id");
 		const colDefs = table.columns
 			.map((c) => `"${c.name}" ${c.type}`)
@@ -544,33 +596,32 @@ export function materializeSchema(
 			);
 		}
 
-		const tableRows = rows.get(table.name) ?? [];
-		inputRows += tableRows.length;
+		// Child tables of this table
+		const myChildTables = childTablesByParent.get(table.name) ?? [];
+		const childSourceCols = new Set(myChildTables.map((ct) => ct.childOf!.sourceColumn));
+
 		const colNames = table.columns.map((c) => c.name);
 		const placeholders = colNames.map(() => "?").join(", ");
 		const insertSql = `INSERT INTO "${table.name}" (${colNames.map((n) => `"${n}"`).join(", ")}) VALUES (${placeholders})`;
 
-		// Child tables for this parent
-		const myChildTables = childTablesByParent.get(table.name) ?? [];
-		const childSourceCols = new Set(myChildTables.map((ct) => ct.childOf!.sourceColumn));
-
-		// Track parent IDs and capture child arrays
-		const parentIdMap = new Map<number, number>(); // rowIndex → auto-increment ID
+		// Track IDs for this table and capture child array data
+		const idMap = new Map<number, number>(); // rowIndex → auto-increment ID
+		tableIdMaps.set(table.name, idMap);
 		const capturedChildData = new Map<string, Array<{ parentIndex: number; items: unknown[] }>>();
 		for (const ct of myChildTables) {
 			capturedChildData.set(ct.name, []);
 		}
-		let nextParentId = 1;
+		let nextId = 1;
 
-		// --- Insert parent rows ---
+		// --- Insert rows ---
 		for (let i = 0; i < tableRows.length; i++) {
 			const row = tableRows[i];
 			const flat =
 				typeof row === "object" && row !== null
-					? flattenObject(row as Record<string, unknown>, 2, hints?.flatten)
+					? flattenObject(row as Record<string, unknown>, flattenDepth, table.childOf ? undefined : hints?.flatten)
 					: { value: row };
 
-			// Capture child array data before inserting parent
+			// Capture child array data before inserting
 			for (const ct of myChildTables) {
 				const sourceCol = ct.childOf!.sourceColumn;
 				const arr = (flat as Record<string, unknown>)[sourceCol];
@@ -579,15 +630,20 @@ export function materializeSchema(
 				}
 			}
 
-			// Build parent values (excluding child source columns)
+			// Build values
 			const values = colNames.map((col) => {
+				if (col === "parent_id" && parentIdMap) {
+					// This is a child table row — resolve parent FK
+					// The parentIndex is embedded in the iteration context
+					return null; // placeholder, set below
+				}
 				const v = (flat as Record<string, unknown>)[col];
 				return sqlValue(v);
 			});
 
 			try {
 				sql.exec(insertSql, ...values);
-				parentIdMap.set(i, nextParentId++);
+				idMap.set(i, nextId++);
 				totalRows++;
 			} catch (err) {
 				failedRows++;
@@ -603,63 +659,115 @@ export function materializeSchema(
 
 		tablesCreated.push(table.name);
 
-		// --- Create and populate child tables ---
+		// --- Recurse into child tables ---
 		for (const childTable of myChildTables) {
-			const hasChildId = childTable.columns.some((c) => c.name === "id");
-			const childColDefs = childTable.columns
-				.map((c) => `"${c.name}" ${c.type}`)
-				.join(", ");
-			const childCreateSql = hasChildId
-				? `CREATE TABLE IF NOT EXISTS "${childTable.name}" (_rowid INTEGER PRIMARY KEY AUTOINCREMENT${childColDefs ? `, ${childColDefs}` : ""})`
-				: `CREATE TABLE IF NOT EXISTS "${childTable.name}" (id INTEGER PRIMARY KEY AUTOINCREMENT${childColDefs ? `, ${childColDefs}` : ""})`;
-			sql.exec(childCreateSql);
+			materializeChildTable(childTable, capturedChildData.get(childTable.name) ?? [], idMap);
+		}
+	}
 
-			for (const idx of childTable.indexes) {
-				sql.exec(
-					`CREATE INDEX IF NOT EXISTS "idx_${childTable.name}_${idx}" ON "${childTable.name}"("${idx}")`,
-				);
-			}
+	/**
+	 * Create and populate a child table, then recurse into its own children (grandchild tables).
+	 */
+	function materializeChildTable(
+		childTable: InferredTable,
+		captured: Array<{ parentIndex: number; items: unknown[] }>,
+		parentIdMap: Map<number, number>,
+	): void {
+		// --- Create child table ---
+		const hasChildId = childTable.columns.some((c) => c.name === "id");
+		const childColDefs = childTable.columns
+			.map((c) => `"${c.name}" ${c.type}`)
+			.join(", ");
+		const childCreateSql = hasChildId
+			? `CREATE TABLE IF NOT EXISTS "${childTable.name}" (_rowid INTEGER PRIMARY KEY AUTOINCREMENT${childColDefs ? `, ${childColDefs}` : ""})`
+			: `CREATE TABLE IF NOT EXISTS "${childTable.name}" (id INTEGER PRIMARY KEY AUTOINCREMENT${childColDefs ? `, ${childColDefs}` : ""})`;
+		sql.exec(childCreateSql);
 
-			const childColNames = childTable.columns.map((c) => c.name);
-			const childPlaceholders = childColNames.map(() => "?").join(", ");
-			const childInsertSql = `INSERT INTO "${childTable.name}" (${childColNames.map((n) => `"${n}"`).join(", ")}) VALUES (${childPlaceholders})`;
+		for (const idx of childTable.indexes) {
+			sql.exec(
+				`CREATE INDEX IF NOT EXISTS "idx_${childTable.name}_${idx}" ON "${childTable.name}"("${idx}")`,
+			);
+		}
 
-			const captured = capturedChildData.get(childTable.name) ?? [];
-			for (const { parentIndex, items } of captured) {
-				const parentId = parentIdMap.get(parentIndex);
-				if (parentId === undefined) continue; // parent failed to insert
+		// Grandchild tables of this child table
+		const myGrandchildTables = childTablesByParent.get(childTable.name) ?? [];
+		const grandchildSourceCols = new Set(myGrandchildTables.map((ct) => ct.childOf!.sourceColumn));
 
-				for (let j = 0; j < items.length; j++) {
-					const item = items[j];
-					const childFlat =
-						item !== null && typeof item === "object" && !Array.isArray(item)
-							? flattenObject(item as Record<string, unknown>, 1)
-							: { value: item };
+		const childColNames = childTable.columns.map((c) => c.name);
+		const childPlaceholders = childColNames.map(() => "?").join(", ");
+		const childInsertSql = `INSERT INTO "${childTable.name}" (${childColNames.map((n) => `"${n}"`).join(", ")}) VALUES (${childPlaceholders})`;
 
-					const childValues = childColNames.map((col) => {
-						if (col === "parent_id") return parentId;
-						const v = (childFlat as Record<string, unknown>)[col];
-						return sqlValue(v);
-					});
+		// Track child IDs for grandchild FK resolution
+		const childIdMap = new Map<number, number>();
+		const capturedGrandchildData = new Map<string, Array<{ parentIndex: number; items: unknown[] }>>();
+		for (const gct of myGrandchildTables) {
+			capturedGrandchildData.set(gct.name, []);
+		}
+		let nextChildId = 1;
+		let childRowIndex = 0;
 
-					try {
-						sql.exec(childInsertSql, ...childValues);
-						totalRows++;
-					} catch (err) {
-						failedRows++;
-						if (warnings.length < MAX_SAMPLE_ERRORS) {
-							warnings.push({
-								rowIndex: j,
-								table: childTable.name,
-								error: err instanceof Error ? err.message : String(err),
-							});
-						}
+		for (const { parentIndex, items } of captured) {
+			const parentId = parentIdMap.get(parentIndex);
+			if (parentId === undefined) continue; // parent failed to insert
+
+			for (let j = 0; j < items.length; j++) {
+				const item = items[j];
+				const childFlat =
+					item !== null && typeof item === "object" && !Array.isArray(item)
+						? flattenObject(item as Record<string, unknown>, 1)
+						: { value: item };
+
+				// Capture grandchild array data before inserting child
+				for (const gct of myGrandchildTables) {
+					const sourceCol = gct.childOf!.sourceColumn;
+					const arr = (childFlat as Record<string, unknown>)[sourceCol];
+					if (Array.isArray(arr) && arr.length > 0) {
+						capturedGrandchildData.get(gct.name)!.push({ parentIndex: childRowIndex, items: arr });
 					}
 				}
-			}
 
-			tablesCreated.push(childTable.name);
+				const childValues = childColNames.map((col) => {
+					if (col === "parent_id") return parentId;
+					const v = (childFlat as Record<string, unknown>)[col];
+					return sqlValue(v);
+				});
+
+				try {
+					sql.exec(childInsertSql, ...childValues);
+					childIdMap.set(childRowIndex, nextChildId++);
+					totalRows++;
+				} catch (err) {
+					failedRows++;
+					if (warnings.length < MAX_SAMPLE_ERRORS) {
+						warnings.push({
+							rowIndex: j,
+							table: childTable.name,
+							error: err instanceof Error ? err.message : String(err),
+						});
+					}
+				}
+				childRowIndex++;
+			}
 		}
+
+		tablesCreated.push(childTable.name);
+
+		// --- Recurse into grandchild tables ---
+		for (const grandchildTable of myGrandchildTables) {
+			materializeChildTable(
+				grandchildTable,
+				capturedGrandchildData.get(grandchildTable.name) ?? [],
+				childIdMap,
+			);
+		}
+	}
+
+	// Process root (parent) tables
+	const parentTables = schema.tables.filter((t) => !t.childOf);
+	for (const table of parentTables) {
+		const tableRows = rows.get(table.name) ?? [];
+		inputRows += tableRows.length;
+		materializeTable(table, tableRows, 2);
 	}
 
 	return { tablesCreated, totalRows, inputRows, failedRows, warnings };
