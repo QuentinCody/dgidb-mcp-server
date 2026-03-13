@@ -6,6 +6,8 @@
  * injected into V8 isolates for Code Mode search tools.
  */
 
+import type { ApiCatalog, ApiEndpoint, ParamDef } from "./catalog";
+
 export interface ResolveOptions {
 	/** Remove x-* extension fields from the output */
 	stripExtensions?: boolean;
@@ -19,6 +21,17 @@ export interface ResolvedSpec {
 	servers?: Array<{ url: string; [k: string]: unknown }>;
 	paths: Record<string, Record<string, unknown>>;
 }
+
+const OPERATION_METHODS = new Set([
+	"get",
+	"post",
+	"put",
+	"delete",
+	"patch",
+	"options",
+	"head",
+	"trace",
+]);
 
 /**
  * Follow a JSON pointer path (e.g., "#/components/schemas/Study") through
@@ -187,5 +200,163 @@ export function resolveOpenApiSpec(raw: unknown, options?: ResolveOptions): Reso
 		info,
 		...(servers ? { servers } : {}),
 		paths,
+	};
+}
+
+function mergeParameterLists(
+	existing: unknown,
+	added: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+	const merged = Array.isArray(existing)
+		? existing
+			.filter((param): param is Record<string, unknown> => Boolean(param) && typeof param === "object")
+			.map((param) => ({ ...param }))
+		: [];
+	const seen = new Set(
+		merged.map((param) => `${String(param.name || "")}:${String(param.in || "")}`),
+	);
+
+	for (const param of added) {
+		const key = `${String(param.name || "")}:${String(param.in || "")}`;
+		if (seen.has(key)) continue;
+		merged.push(param);
+		seen.add(key);
+	}
+
+	return merged;
+}
+
+function createParameterSchema(param: ParamDef): Record<string, unknown> {
+	const schema: Record<string, unknown> = { type: param.type };
+	if (param.default !== undefined) schema.default = param.default;
+	if (param.enum?.length) schema.enum = param.enum;
+	if (param.type === "array") {
+		schema.items = { type: "string" };
+	}
+	return schema;
+}
+
+function toOpenApiParameter(
+	param: ParamDef,
+	location: "path" | "query",
+): Record<string, unknown> {
+	return {
+		name: param.name,
+		in: location,
+		required: location === "path" ? true : param.required,
+		description: param.description,
+		schema: createParameterSchema(param),
+	};
+}
+
+function createRequestBody(endpoint: ApiEndpoint): Record<string, unknown> | undefined {
+	if (!endpoint.body) return undefined;
+
+	let schema: Record<string, unknown> = { type: "object" };
+	if (endpoint.body.contentType.includes("text/plain")) {
+		schema = { type: "string" };
+	} else if (endpoint.body.contentType.includes("application/x-www-form-urlencoded")) {
+		schema = { type: "object", additionalProperties: { type: "string" } };
+	}
+
+	return {
+		description: endpoint.body.description,
+		content: {
+			[endpoint.body.contentType]: {
+				schema,
+			},
+		},
+	};
+}
+
+function buildOperationFromCatalog(endpoint: ApiEndpoint): Record<string, unknown> {
+	const parameters = [
+		...(endpoint.pathParams || []).map((param) => toOpenApiParameter(param, "path")),
+		...(endpoint.queryParams || []).map((param) => toOpenApiParameter(param, "query")),
+	];
+
+	return {
+		summary: endpoint.summary,
+		...(endpoint.description ? { description: endpoint.description } : {}),
+		tags: endpoint.category ? [endpoint.category] : [],
+		...(parameters.length > 0 ? { parameters } : {}),
+		...(createRequestBody(endpoint) ? { requestBody: createRequestBody(endpoint) } : {}),
+		responses: {
+			"200": {
+				description: endpoint.response?.description || "Successful response",
+			},
+		},
+	};
+}
+
+function mergeEndpointIntoOperation(
+	existing: Record<string, unknown>,
+	endpoint: ApiEndpoint,
+): Record<string, unknown> {
+	const merged = { ...existing };
+
+	if (!merged.summary && endpoint.summary) merged.summary = endpoint.summary;
+	if (!merged.description && endpoint.description) merged.description = endpoint.description;
+
+	const tags = new Set(
+		Array.isArray(merged.tags)
+			? merged.tags.filter((tag): tag is string => typeof tag === "string")
+			: [],
+	);
+	if (endpoint.category) tags.add(endpoint.category);
+	if (tags.size > 0) merged.tags = Array.from(tags);
+
+	const addedParameters = [
+		...(endpoint.pathParams || []).map((param) => toOpenApiParameter(param, "path")),
+		...(endpoint.queryParams || []).map((param) => toOpenApiParameter(param, "query")),
+	];
+	if (addedParameters.length > 0) {
+		merged.parameters = mergeParameterLists(merged.parameters, addedParameters);
+	}
+
+	if (!merged.requestBody) {
+		const requestBody = createRequestBody(endpoint);
+		if (requestBody) merged.requestBody = requestBody;
+	}
+
+	if (!merged.responses) {
+		merged.responses = buildOperationFromCatalog(endpoint).responses;
+	}
+
+	return merged;
+}
+
+/**
+ * Merge legacy catalog endpoints into a resolved OpenAPI spec.
+ *
+ * This preserves partial published specs while retaining server-specific
+ * endpoints and curated descriptions that only exist in catalog.ts.
+ */
+export function mergeCatalogIntoResolvedSpec(
+	spec: ResolvedSpec,
+	catalog: ApiCatalog,
+): ResolvedSpec {
+	const nextPaths: ResolvedSpec["paths"] = Object.fromEntries(
+		Object.entries(spec.paths).map(([path, pathItem]) => [path, { ...pathItem }]),
+	);
+
+	for (const endpoint of catalog.endpoints) {
+		const method = endpoint.method.toLowerCase();
+		if (!OPERATION_METHODS.has(method)) continue;
+
+		const pathItem = { ...(nextPaths[endpoint.path] || {}) };
+		const existing = pathItem[method];
+
+		pathItem[method] =
+			existing && typeof existing === "object"
+				? mergeEndpointIntoOperation(existing as Record<string, unknown>, endpoint)
+				: buildOperationFromCatalog(endpoint);
+
+		nextPaths[endpoint.path] = pathItem;
+	}
+
+	return {
+		...spec,
+		paths: nextPaths,
 	};
 }

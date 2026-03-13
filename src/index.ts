@@ -1,6 +1,6 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
+import { z } from "zod/v3";
 import { JsonToSqlDO } from "./do.js";
 
 // ========================================
@@ -314,20 +314,6 @@ export class DGIdbMCP extends McpAgent {
 		return queryResult;
 	}
 
-	private async deleteDataset(dataAccessId: string): Promise<boolean> {
-		const env = this.env as DGIdbEnv;
-		if (!env?.JSON_TO_SQL_DO) {
-			throw new Error("JSON_TO_SQL_DO binding not available");
-		}
-
-		const doId = env.JSON_TO_SQL_DO.idFromName(dataAccessId);
-		const stub = env.JSON_TO_SQL_DO.get(doId);
-
-		const response = await stub.fetch("http://do/delete", { method: 'DELETE' });
-
-		return response.ok;
-	}
-
 	// ========================================
 	// ERROR HANDLING - Enhanced for MCP 2025-06-18
 	// ========================================
@@ -385,14 +371,7 @@ export default {
 
 		// Handle standard MCP requests via Streamable HTTP
 		if (url.pathname.startsWith("/mcp")) {
-			// @ts-ignore - Type mismatch in agents library
 			return DGIdbMCP.serve("/mcp", { binding: "MCP_OBJECT" }).fetch(request, env, ctx);
-		}
-
-		// Handle SSE transport (legacy support)
-		if (url.pathname === "/sse" || url.pathname.startsWith("/sse/")) {
-			// @ts-ignore - Type mismatch in agents library
-			return DGIdbMCP.serveSSE("/sse", { binding: "MCP_OBJECT" }).fetch(request, env, ctx);
 		}
 
 		// Dataset management endpoints
@@ -433,7 +412,7 @@ export default {
 		}
 
 		return new Response(
-			`${API_CONFIG.name} - Available on /sse and /mcp endpoints`,
+			`${API_CONFIG.name} - Available on /mcp endpoint`,
 			{ status: 404, headers: { "Content-Type": "text/plain" } }
 		);
 	},

@@ -1,14 +1,18 @@
 /**
  * API Proxy source — pure JS injected into V8 isolates.
  *
- * Provides an `api` object with .get() and .post() methods that route
- * through the hidden __api_proxy tool back to the server's HTTP layer.
- * API keys never enter the isolate.
+ * Provides:
+ *   api.get(path, params)  — HTTP GET through server's fetch layer
+ *   api.post(path, body, params) — HTTP POST
+ *   api.query(dataAccessId, sql) — SQL query against staged data (alias for db.queryStaged)
+ *   db.queryStaged(dataAccessId, sql) — SQL query against staged data (StorageContext design)
+ *
+ * API keys never enter the isolate — all HTTP goes through the host's apiFetch.
  *
  * Large responses (>30KB) are auto-staged into SQLite. When this happens,
  * the result has `__staged: true` with a `data_access_id` and `schema`.
- * Common data-access patterns (.results, .data, .entries, iteration) throw
- * a clear error directing the LLM to return the staging info and use query_data.
+ * Code can either return the staging metadata for the caller to use query_data,
+ * or use api.query()/db.queryStaged() to query the data in-band with SQL.
  */
 
 /**
@@ -18,9 +22,12 @@
 export function buildApiProxySource(): string {
 	return `
 // --- API proxy helpers (injected) ---
+// __stagedResults is declared in the evaluate() scope (module prefix) so it's
+// accessible both inside this IIFE and in the module suffix return statement.
 
-/** Wrap a staged response in a Proxy that gives clear errors on data access. */
+/** Wrap a staged response — warn on data array access instead of throwing. */
 function __wrapStaged(raw) {
+  __stagedResults.push(raw);
   var msg = raw.message || "Response was auto-staged.";
   var hint = " Return this object and use the query_data tool with data_access_id=\\"" +
     raw.data_access_id + "\\" to query it with SQL.";
@@ -28,11 +35,26 @@ function __wrapStaged(raw) {
   return new Proxy(raw, {
     get: function(target, prop) {
       if (typeof prop === "string" && TRAP_KEYS.indexOf(prop) !== -1 && !(prop in target)) {
-        throw new Error(msg + hint);
+        console.warn("[staging] Accessed \\\"" + prop + "\\\" on staged response — this array was replaced by SQLite tables. " + hint);
+        return undefined;
       }
       return target[prop];
     }
   });
+}
+
+/** Query staged data via SQL. Shared implementation for api.query and db.queryStaged. */
+async function __queryStaged(dataAccessId, sql) {
+  if (!dataAccessId) throw new Error("dataAccessId is required");
+  if (!sql) throw new Error("sql is required");
+  var result = await codemode.__query_proxy({
+    data_access_id: dataAccessId,
+    sql: sql,
+  });
+  if (result && result.__query_error) {
+    throw new Error("Query failed: " + (result.message || "Unknown error"));
+  }
+  return { results: result.rows || [], row_count: result.row_count || 0 };
 }
 
 var api = {
@@ -43,7 +65,8 @@ var api = {
    *
    * If the response is large (>30KB), it is auto-staged into SQLite.
    * In that case the return value has __staged=true, data_access_id, and schema.
-   * Return this object directly — the caller can use query_data to explore it.
+   * Use api.query(result.data_access_id, sql) to query it in-band,
+   * or return the staging info for the caller to use query_data.
    */
   get: async function(path, params) {
     var result = await codemode.__api_proxy({
@@ -52,9 +75,14 @@ var api = {
       params: params || {},
     });
     if (result && result.__api_error) {
-      var err = new Error("API error " + result.status + ": " + (result.message || "Unknown error"));
+      var errorMessage = result.message || "Unknown error";
+      if (result.drift_hint && result.drift_hint.message) {
+        errorMessage += " " + result.drift_hint.message;
+      }
+      var err = new Error("API error " + result.status + ": " + errorMessage);
       err.status = result.status;
       err.data = result.data;
+      err.driftHint = result.drift_hint;
       throw err;
     }
     if (result && result.__staged) {
@@ -75,15 +103,51 @@ var api = {
       body: body,
     });
     if (result && result.__api_error) {
-      var err = new Error("API error " + result.status + ": " + (result.message || "Unknown error"));
+      var errorMessage = result.message || "Unknown error";
+      if (result.drift_hint && result.drift_hint.message) {
+        errorMessage += " " + result.drift_hint.message;
+      }
+      var err = new Error("API error " + result.status + ": " + errorMessage);
       err.status = result.status;
       err.data = result.data;
+      err.driftHint = result.drift_hint;
       throw err;
     }
     if (result && result.__staged) {
       return __wrapStaged(result);
     }
     return result;
+  },
+
+  /**
+   * Query staged data with SQL. Use after api.get/api.post returns __staged=true.
+   *   const result = await api.get(path, params);
+   *   if (result.__staged) {
+   *     const rows = await api.query(result.data_access_id, "SELECT * FROM " + result.tables_created[0] + " LIMIT 10");
+   *     return rows.results;
+   *   }
+   * Returns { results: [...], row_count: N }.
+   * Only SELECT queries are allowed. Max 1000 rows.
+   */
+  query: function(dataAccessId, sql) {
+    return __queryStaged(dataAccessId, sql);
+  },
+};
+
+/** StorageContext — database-first API for working with staged data (ADR-004). */
+var db = {
+  /**
+   * Query staged data with SQL. Alias for api.query().
+   *   if (result.__staged) {
+   *     const grouped = await db.queryStaged(result.data_access_id,
+   *       "SELECT category, COUNT(*) as n FROM " + result.tables_created[0] + " GROUP BY category"
+   *     );
+   *     return grouped.results;
+   *   }
+   * Returns { results: [...], row_count: N }.
+   */
+  queryStaged: function(dataAccessId, sql) {
+    return __queryStaged(dataAccessId, sql);
   },
 };
 // --- End API proxy helpers ---

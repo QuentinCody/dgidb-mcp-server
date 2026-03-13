@@ -77,6 +77,13 @@ export class RestStagingDO extends DurableObject {
 			if (url.pathname === "/schema" && request.method === "GET") {
 				return await this.handleSchema();
 			}
+			if (url.pathname === "/register" && request.method === "POST") {
+				return await this.handleRegister(request);
+			}
+			if (url.pathname === "/list" && request.method === "GET") {
+				const sessionId = url.searchParams.get("session_id") ?? undefined;
+				return await this.handleList(sessionId);
+			}
 			if (url.pathname === "/delete" && request.method === "DELETE") {
 				await this.ctx.storage.deleteAll();
 				return this.jsonResponse({ success: true });
@@ -491,6 +498,99 @@ export class RestStagingDO extends DurableObject {
 				},
 			},
 		});
+	}
+
+	/**
+	 * Register a staged data_access_id against a session.
+	 * Called on the __registry__ DO instance by stageToDoAndRespond().
+	 */
+	private async handleRegister(request: Request): Promise<Response> {
+		const body = (await request.json()) as {
+			session_id: string;
+			data_access_id: string;
+			tool_name?: string;
+			tables?: string[];
+			total_rows?: number;
+			tool_prefix?: string;
+		};
+
+		if (!body.session_id || !body.data_access_id) {
+			return this.jsonResponse(
+				{ success: false, error: "session_id and data_access_id are required" },
+				400,
+			);
+		}
+
+		this.ctx.storage.sql.exec(
+			`CREATE TABLE IF NOT EXISTS _session_registry (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				session_id TEXT NOT NULL,
+				data_access_id TEXT NOT NULL,
+				tool_name TEXT,
+				tables_json TEXT,
+				total_rows INTEGER,
+				tool_prefix TEXT,
+				created_at TEXT DEFAULT CURRENT_TIMESTAMP
+			)`,
+		);
+
+		// TTL cleanup: remove entries older than 24h
+		this.ctx.storage.sql.exec(
+			`DELETE FROM _session_registry WHERE created_at < datetime('now', '-24 hours')`,
+		);
+
+		this.ctx.storage.sql.exec(
+			`INSERT INTO _session_registry (session_id, data_access_id, tool_name, tables_json, total_rows, tool_prefix) VALUES (?, ?, ?, ?, ?, ?)`,
+			body.session_id,
+			body.data_access_id,
+			body.tool_name ?? null,
+			body.tables ? JSON.stringify(body.tables) : null,
+			body.total_rows ?? null,
+			body.tool_prefix ?? null,
+		);
+
+		return this.jsonResponse({ success: true });
+	}
+
+	/**
+	 * List staged data_access_ids for a session.
+	 * Called on the __registry__ DO instance by get_schema when data_access_id is omitted.
+	 */
+	private async handleList(sessionId?: string): Promise<Response> {
+		// Check if the registry table exists
+		const tableExists = this.ctx.storage.sql
+			.exec(`SELECT name FROM sqlite_master WHERE type='table' AND name='_session_registry'`)
+			.toArray();
+		if (tableExists.length === 0) {
+			return this.jsonResponse({ success: true, datasets: [] });
+		}
+
+		// TTL cleanup
+		this.ctx.storage.sql.exec(
+			`DELETE FROM _session_registry WHERE created_at < datetime('now', '-24 hours')`,
+		);
+
+		if (!sessionId) {
+			return this.jsonResponse({ success: true, datasets: [] });
+		}
+
+		const rows = this.ctx.storage.sql
+			.exec(
+				`SELECT data_access_id, tool_name, tables_json, total_rows, tool_prefix, created_at FROM _session_registry WHERE session_id = ? ORDER BY created_at DESC`,
+				sessionId,
+			)
+			.toArray();
+
+		const datasets = rows.map((row: Record<string, unknown>) => ({
+			data_access_id: row.data_access_id as string,
+			tool_name: row.tool_name as string | null,
+			tables: row.tables_json ? JSON.parse(row.tables_json as string) : [],
+			total_rows: row.total_rows as number | null,
+			tool_prefix: row.tool_prefix as string | null,
+			created_at: row.created_at as string,
+		}));
+
+		return this.jsonResponse({ success: true, datasets });
 	}
 
 	private jsonResponse(data: unknown, status = 200): Response {

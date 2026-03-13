@@ -17,6 +17,7 @@ export function buildOpenApiSearchSource(specJson: string): string {
 	return `
 // --- OpenAPI search helpers (injected) ---
 var spec = Object.freeze(JSON.parse(${JSON.stringify(specJson)}));
+var SPEC = spec;
 
 var __HTTP_METHODS = ["get", "post", "put", "delete", "patch", "options", "head", "trace"];
 
@@ -151,11 +152,23 @@ function getOperation(idOrPath) {
 }
 
 /**
- * Format an operation as readable documentation.
+ * Get an operation by path and optional method, matching the legacy
+ * catalog helper shape used inside execute().
  */
-function describeOperation(idOrPath) {
-  var op = getOperation(idOrPath);
-  if (!op) return "Operation not found: " + idOrPath;
+function __getOperationByPathAndMethod(path, method) {
+  var ops = __collectOperations();
+  var normalizedMethod = method ? String(method).toLowerCase() : null;
+
+  for (var i = 0; i < ops.length; i++) {
+    if (ops[i].path !== path) continue;
+    if (!normalizedMethod || ops[i].method === normalizedMethod) return ops[i];
+  }
+
+  return null;
+}
+
+function __describeOperation(op, missingLabel) {
+  if (!op) return missingLabel;
 
   var lines = [
     op.method.toUpperCase() + " " + op.path,
@@ -197,6 +210,35 @@ function describeOperation(idOrPath) {
   }
 
   return lines.join("\\n");
+}
+
+/**
+ * Format an operation as readable documentation.
+ */
+function describeOperation(idOrPath) {
+  var op = getOperation(idOrPath);
+  return __describeOperation(op, "Operation not found: " + idOrPath);
+}
+
+// Legacy aliases used by existing execute() prompts/descriptions.
+function searchSpec(query, maxResults) {
+  return searchPaths(query, maxResults);
+}
+
+function listCategories() {
+  return listTags().map(function(entry) {
+    return { category: entry.tag, count: entry.count };
+  });
+}
+
+function getEndpoint(path, method) {
+  return __getOperationByPathAndMethod(path, method);
+}
+
+function describeEndpoint(path, method) {
+  var op = __getOperationByPathAndMethod(path, method);
+  var label = "Endpoint not found: " + ((method || "GET").toUpperCase()) + " " + path;
+  return __describeOperation(op, label);
 }
 // --- End OpenAPI search helpers ---
 `;

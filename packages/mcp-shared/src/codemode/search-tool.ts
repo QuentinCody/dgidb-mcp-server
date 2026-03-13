@@ -16,6 +16,28 @@ import type { ApiCatalog, ApiEndpoint } from "./catalog";
 import type { ResolvedSpec } from "./openapi-resolver";
 import { buildOpenApiSearchSource } from "./openapi-search";
 
+interface OpenApiOperation {
+	path: string;
+	method: string;
+	summary?: string;
+	description?: string;
+	operationId?: string;
+	tags?: string[];
+	parameters?: Array<{
+		name?: string;
+		in?: string;
+		required?: boolean;
+		description?: string;
+		schema?: { type?: string };
+		type?: string;
+	}>;
+	requestBody?: {
+		description?: string;
+		content?: Record<string, unknown>;
+	};
+	responses?: Record<string, { description?: string }>;
+}
+
 export interface SearchToolOptions {
 	/** Tool name prefix (e.g., "gtex" → "gtex_search") */
 	prefix: string;
@@ -107,6 +129,59 @@ function countSpecOperations(spec: ResolvedSpec): number {
 	return count;
 }
 
+function formatOperation(op: OpenApiOperation): string {
+	const lines = [`${op.method.toUpperCase()} ${op.path} — ${op.summary || op.operationId || "No summary"}`];
+
+	if (op.operationId) lines.push(`  Operation ID: ${op.operationId}`);
+	if (op.tags?.length) lines.push(`  Tags: ${op.tags.join(", ")}`);
+
+	for (const param of op.parameters || []) {
+		const type = param.schema?.type || param.type || "unknown";
+		const location = param.in || "unknown";
+		lines.push(
+			`  Param: ${param.name || "(unnamed)"} (${location}, ${type}, ${param.required ? "required" : "optional"})` +
+			`${param.description ? ` — ${param.description}` : ""}`,
+		);
+	}
+
+	const contentTypes = Object.keys(op.requestBody?.content || {});
+	if (contentTypes.length > 0) {
+		lines.push(
+			`  Body: ${contentTypes[0]}${op.requestBody?.description ? ` — ${op.requestBody.description}` : ""}`,
+		);
+	}
+
+	if (op.responses) {
+		for (const [status, response] of Object.entries(op.responses)) {
+			if (response?.description) {
+				lines.push(`  Response: ${status} — ${response.description}`);
+				break;
+			}
+		}
+	}
+
+	return lines.join("\n");
+}
+
+function createOpenApiHelpers(specJson: string) {
+	const searchSource = buildOpenApiSearchSource(specJson);
+	const fn = new Function(
+		`${searchSource}; return { searchPaths, listTags, getOperation, describeOperation, searchSpec, listCategories, getEndpoint, describeEndpoint, spec, SPEC };`,
+	);
+	return fn() as {
+		searchPaths: (query: string, maxResults?: number) => OpenApiOperation[];
+		listTags: () => Array<{ tag: string; count: number }>;
+		getOperation: (idOrPath: string) => OpenApiOperation | null;
+		describeOperation: (idOrPath: string) => string;
+		searchSpec: (query: string, maxResults?: number) => OpenApiOperation[];
+		listCategories: () => Array<{ category: string; count: number }>;
+		getEndpoint: (path: string, method?: string) => OpenApiOperation | null;
+		describeEndpoint: (path: string, method?: string) => string;
+		spec: ResolvedSpec;
+		SPEC: ResolvedSpec;
+	};
+}
+
 /**
  * Create a search tool in OpenAPI mode.
  *
@@ -118,16 +193,18 @@ function createOpenApiSearchTool(prefix: string, spec: ResolvedSpec) {
 	const toolName = `${prefix}_search`;
 	const operationCount = countSpecOperations(spec);
 	const specJson = JSON.stringify(spec);
+	const helpers = createOpenApiHelpers(specJson);
 
 	return {
 		name: toolName,
 		description:
 			`Search the ${spec.info.title} API (${operationCount} operations across ${Object.keys(spec.paths).length} paths). ` +
-			`Write JavaScript code to search the OpenAPI spec. Available functions:\n\n` +
+			`Write JavaScript code to search the OpenAPI spec, or use the legacy query/category arguments for keyword search. Available functions:\n\n` +
 			`- searchPaths(query, maxResults=10) — keyword search across paths, summaries, tags, parameters\n` +
 			`- listTags() — list all tags with operation counts\n` +
 			`- getOperation(idOrPath) — get full operation by operationId or path\n` +
 			`- describeOperation(idOrPath) — formatted documentation for an operation\n` +
+			`- searchSpec/query helpers are also available for backward compatibility inside execute()\n` +
 			`- spec — the full frozen OpenAPI spec object (spec.paths, spec.info, etc.)\n\n` +
 			`Use ${prefix}_search to discover endpoints, then write code in ${prefix}_execute to call them.\n\n` +
 			`USAGE IN ${prefix}_execute:\n` +
@@ -141,40 +218,93 @@ function createOpenApiSearchTool(prefix: string, spec: ResolvedSpec) {
 				'Examples: \'return searchPaths("studies")\', \'return listTags()\', ' +
 				'\'return describeOperation("getStudies")\'',
 			),
+			query: z.string().optional().describe(
+				"Legacy keyword search. Optional alternative to code. Use '*' or an empty string to browse operations.",
+			),
+			category: z.string().optional().describe(
+				"Legacy category filter. Matches OpenAPI tags case-insensitively.",
+			),
+			max_results: z.number().optional().describe(
+				"Maximum results to return for legacy keyword search (default 10, max 25).",
+			),
 		},
 
 		register(server: { tool: (...args: unknown[]) => void }) {
 			const description = this.description;
 			const schema = this.schema;
 
-			server.tool(toolName, description, schema, async (input: { code: string }) => {
+			server.tool(toolName, description, schema, async (input: {
+				code?: string;
+				query?: string;
+				category?: string;
+				max_results?: number;
+			}) => {
 				const code = input.code?.trim() || "";
+				const query = input.query?.trim() || "";
+				const category = input.category?.trim();
+					const maxResults = Math.min(input.max_results || 10, 25);
 
-				if (!code) {
+					if (!code) {
+						let results = query === "*" || query === ""
+						? helpers.searchPaths("", operationCount)
+						: helpers.searchPaths(query, category ? operationCount : maxResults);
+
+					if (category) {
+						const normalized = category.toLowerCase();
+						results = results.filter((op) =>
+							(op.tags || []).some((tag) => tag.toLowerCase() === normalized)
+						);
+					}
+
+					if (query === "*" || query === "") {
+						results = results.slice(0, maxResults);
+					}
+
+					if (results.length === 0) {
+						const availableTags = helpers.listTags()
+							.map((entry) => `  ${entry.tag} (${entry.count} operations)`)
+							.join("\n");
+						return {
+							content: [{
+								type: "text" as const,
+								text:
+									`No operations found for "${query || "*"}"${category ? ` in category "${category}"` : ""}.\n\n` +
+									`Available categories:\n${availableTags}\n\nTry broader search terms, browse by category, or provide code.`,
+							}],
+							structuredContent: {
+								success: true,
+								data: {
+									total_operations: operationCount,
+									total_endpoints: operationCount,
+									results_count: 0,
+									operations: [],
+									endpoints: [],
+								},
+							},
+						};
+					}
+
+					const formatted = results.map(formatOperation).join("\n\n");
+					const header = `Found ${results.length} operation(s) in ${spec.info.title} API (${operationCount} total):`;
+
 					return {
-						content: [{
-							type: "text" as const,
-							text: "No code provided. Use searchPaths(query), listTags(), " +
-								"getOperation(id), or describeOperation(id) to search the API spec.",
-						}],
+						content: [{ type: "text" as const, text: `${header}\n\n${formatted}` }],
 						structuredContent: {
 							success: true,
 							data: {
-								hint: "Provide JavaScript code to search the spec.",
-								available_functions: [
-									"searchPaths(query, maxResults)",
-									"listTags()",
-									"getOperation(idOrPath)",
-									"describeOperation(idOrPath)",
-								],
-								operation_count: operationCount,
+								total_operations: operationCount,
+								total_endpoints: operationCount,
+								results_count: results.length,
+								operations: results,
+								endpoints: results,
 							},
 						},
 					};
 				}
 
 				try {
-					// Build the search helpers source and wrap user code
+					// Build the search helpers source and wrap user code.
+					// The helpers also expose legacy aliases used by execute().
 					const searchSource = buildOpenApiSearchSource(specJson);
 					const wrappedCode = `${searchSource}\n${code}`;
 

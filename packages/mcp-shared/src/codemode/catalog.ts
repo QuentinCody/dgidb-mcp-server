@@ -25,10 +25,23 @@ export interface ApiEndpoint {
 	queryParams?: ParamDef[];
 	body?: { contentType: string; description?: string };
 	response?: { description?: string; example?: unknown };
+	/** TypeScript-like shape string describing the response structure */
+	responseShape?: string;
+	/** Code example showing how to call this endpoint via api.get/api.post */
+	example?: string;
+	/** Hint for the LLM on how to use this endpoint in Code Mode */
+	usageHint?: string;
 	/** Links to an existing hand-built MCP tool that covers this endpoint */
 	coveredByTool?: string;
 	/** Marks the endpoint as deprecated/discontinued — AI should avoid using it */
 	deprecated?: boolean;
+}
+
+/** A multi-step recipe combining several API endpoints into a reusable workflow. */
+export interface WorkflowRecipe {
+	name: string;
+	description: string;
+	steps: string[];
 }
 
 export interface ApiCatalog {
@@ -40,6 +53,8 @@ export interface ApiCatalog {
 	/** Important notes about response formats, quirks, or conventions for this API */
 	notes?: string;
 	endpoints: ApiEndpoint[];
+	/** Multi-step workflow recipes combining multiple endpoints */
+	workflows?: WorkflowRecipe[];
 }
 
 /**

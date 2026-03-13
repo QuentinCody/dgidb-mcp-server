@@ -316,7 +316,10 @@ function inferChildTableSchema(
 	const grandchildTables: InferredTable[] = [];
 	const extractedColumns = new Set<string>();
 
-	for (const [colName, colValues] of columnValues) {
+	for (const [rawColName, colValues] of columnValues) {
+		// Rename source columns that collide with the synthetic parent_id FK
+		const colName = rawColName === "parent_id" ? "source_parent_id" : rawColName;
+
 		const classification = classifyColumn(colValues);
 
 		// Recurse into object arrays if we haven't hit the depth limit
@@ -728,7 +731,9 @@ export function materializeSchema(
 
 				const childValues = childColNames.map((col) => {
 					if (col === "parent_id") return parentId;
-					const v = (childFlat as Record<string, unknown>)[col];
+					// Reverse the source_parent_id rename from schema inference
+					const lookupKey = col === "source_parent_id" ? "parent_id" : col;
+					const v = (childFlat as Record<string, unknown>)[lookupKey];
 					return sqlValue(v);
 				});
 
