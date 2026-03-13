@@ -289,6 +289,7 @@ export class RestStagingDO extends DurableObject {
 				table_count: result.tablesCreated.length,
 				total_rows: result.totalRows,
 				input_rows: result.inputRows,
+				table_row_counts: result.tableRowCounts,
 				tables_created: result.tablesCreated,
 				...(relationships.length > 0 ? { relationships } : {}),
 				...(Object.keys(stagingWarnings).length > 0 ? { staging_warnings: stagingWarnings } : {}),

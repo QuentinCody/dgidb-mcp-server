@@ -15,6 +15,12 @@ export function buildStagingMetadata(opts) {
         tables: opts.tables,
         primary_table: opts.primaryTable ?? opts.tables[0],
         total_rows: opts.totalRows,
+        ...(opts.primaryTableRows != null
+            ? { primary_table_rows: opts.primaryTableRows }
+            : {}),
+        ...(opts.tableRowCounts && Object.keys(opts.tableRowCounts).length > 0
+            ? { table_row_counts: opts.tableRowCounts }
+            : {}),
         payload_size_bytes: opts.payloadSizeBytes,
         query_tool: `${opts.toolPrefix}_query_data`,
         schema_tool: `${opts.toolPrefix}_get_schema`,

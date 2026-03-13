@@ -89,6 +89,7 @@ export async function stageToDoAndRespond(
 		tables_created?: string[];
 		total_rows?: number;
 		input_rows?: number;
+		table_row_counts?: Record<string, number>;
 		staging_warnings?: Record<string, unknown>;
 		relationships?: TableRelationship[];
 	};
@@ -109,6 +110,10 @@ export async function stageToDoAndRespond(
 
 	const tables = processResult.tables_created ?? [];
 	const resolvedToolPrefix = toolPrefix ?? prefix;
+	const primaryTable = tables[0];
+	const primaryTableRows = processResult.table_row_counts
+		? (primaryTable ? (processResult.table_row_counts[primaryTable] ?? 0) : undefined)
+		: undefined;
 
 	// Register in session registry if sessionId is available
 	if (sessionId) {
@@ -144,7 +149,10 @@ export async function stageToDoAndRespond(
 		_staging: buildStagingMetadata({
 			dataAccessId,
 			tables,
+			primaryTable,
 			totalRows: processResult.total_rows,
+			primaryTableRows,
+			tableRowCounts: processResult.table_row_counts,
 			payloadSizeBytes: payloadBytes,
 			toolPrefix: resolvedToolPrefix,
 			relationships: processResult.relationships,

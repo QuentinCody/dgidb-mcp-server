@@ -47,6 +47,10 @@ export async function stageToDoAndRespond(data, doNamespace, prefix, _schemaHint
     const schemaResult = (await schemaResp.json());
     const tables = processResult.tables_created ?? [];
     const resolvedToolPrefix = toolPrefix ?? prefix;
+    const primaryTable = tables[0];
+    const primaryTableRows = processResult.table_row_counts
+        ? (primaryTable ? (processResult.table_row_counts[primaryTable] ?? 0) : undefined)
+        : undefined;
     // Register in session registry if sessionId is available
     if (sessionId) {
         try {
@@ -79,7 +83,10 @@ export async function stageToDoAndRespond(data, doNamespace, prefix, _schemaHint
         _staging: buildStagingMetadata({
             dataAccessId,
             tables,
+            primaryTable,
             totalRows: processResult.total_rows,
+            primaryTableRows,
+            tableRowCounts: processResult.table_row_counts,
             payloadSizeBytes: payloadBytes,
             toolPrefix: resolvedToolPrefix,
             relationships: processResult.relationships,

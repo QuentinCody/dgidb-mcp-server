@@ -25,8 +25,19 @@ export interface StagingMetadata {
 	tables: string[];
 	/** Primary table (usually the first / most important) */
 	primary_table?: string;
-	/** Total rows inserted across all tables */
+	/**
+	 * Total rows inserted across ALL tables (parent + child + junction).
+	 * WARNING: This is NOT the entity count — use `primary_table_rows` for that.
+	 */
 	total_rows?: number;
+	/**
+	 * Number of rows in the primary (parent) table — represents the actual entity count.
+	 * Use this when reporting "how many X were found" (e.g., 96 gene-drug interactions).
+	 * `total_rows` may be much higher due to child/junction tables.
+	 */
+	primary_table_rows?: number;
+	/** Row counts per table — use to understand data distribution across tables */
+	table_row_counts?: Record<string, number>;
 	/** Approximate payload size in bytes before staging */
 	payload_size_bytes?: number;
 	/** Tool name for querying staged data (e.g. "ctgov_query_data") */
@@ -45,6 +56,8 @@ export function buildStagingMetadata(opts: {
 	tables: string[];
 	primaryTable?: string;
 	totalRows?: number;
+	primaryTableRows?: number;
+	tableRowCounts?: Record<string, number>;
 	payloadSizeBytes?: number;
 	toolPrefix: string;
 	relationships?: TableRelationship[];
@@ -55,6 +68,12 @@ export function buildStagingMetadata(opts: {
 		tables: opts.tables,
 		primary_table: opts.primaryTable ?? opts.tables[0],
 		total_rows: opts.totalRows,
+		...(opts.primaryTableRows != null
+			? { primary_table_rows: opts.primaryTableRows }
+			: {}),
+		...(opts.tableRowCounts && Object.keys(opts.tableRowCounts).length > 0
+			? { table_row_counts: opts.tableRowCounts }
+			: {}),
 		payload_size_bytes: opts.payloadSizeBytes,
 		query_tool: `${opts.toolPrefix}_query_data`,
 		schema_tool: `${opts.toolPrefix}_get_schema`,
