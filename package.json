@@ -7,7 +7,7 @@
     "deploy": "wrangler deploy",
     "dev": "wrangler dev --port 8797",
     "format": "biome format --write",
-    "lint": "biome lint src/",
+    "lint": "biome lint --diagnostic-level=error src/",
     "lint:fix": "biome lint --fix",
     "start": "wrangler dev",
     "cf-typegen": "wrangler types"
@@ -20,12 +20,12 @@
   },
   "dependencies": {
     "@bio-mcp/shared": "workspace:*",
-    "@modelcontextprotocol/sdk": "1.25.1",
+    "@modelcontextprotocol/sdk": "1.26.0",
     "agents": "^0.7.6",
     "zod": "^4.3.6"
   },
   "overrides": {
-    "@modelcontextprotocol/sdk": "1.25.1"
+    "@modelcontextprotocol/sdk": "1.26.0"
   },
   "workspaces": [
     "packages/*"

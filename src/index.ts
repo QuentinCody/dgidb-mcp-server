@@ -76,7 +76,7 @@ export class DGIdbMCP extends McpAgent {
 			API_CONFIG.tools.graphql.description,
 			{
 				query: z.string().describe("GraphQL query string"),
-				variables: z.record(z.any()).optional().describe("Optional variables for the GraphQL query")
+				variables: z.record(z.string(), z.any()).optional().describe("Optional variables for the GraphQL query")
 			},
 			async ({ query, variables }) => {
 				try {
