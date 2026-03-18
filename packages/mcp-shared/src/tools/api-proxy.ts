@@ -483,6 +483,65 @@ export function createApiProxyTool(options: ApiProxyToolOptions): ToolEntry {
 }
 
 // ---------------------------------------------------------------------------
+// __stage_proxy — routes db.stage() calls to the DO for arbitrary data staging
+// ---------------------------------------------------------------------------
+
+export interface StageProxyToolOptions {
+	/** DO namespace for staging data */
+	doNamespace: unknown;
+	/** Prefix for data access IDs (e.g., "gtex") */
+	stagingPrefix: string;
+}
+
+/**
+ * Create the hidden __stage_proxy tool entry.
+ * Stages arbitrary data from isolate db.stage() into the server's Durable Object.
+ */
+export function createStageProxyTool(options: StageProxyToolOptions): ToolEntry {
+	const { doNamespace, stagingPrefix } = options;
+
+	return {
+		name: "__stage_proxy",
+		description: "Stage arbitrary data from V8 isolate into DO SQLite. Internal only.",
+		hidden: true,
+		schema: {
+			data: z.unknown(),
+			table_name: z.string().optional(),
+		},
+		handler: async (input) => {
+			const data = input.data;
+			const tableName = input.table_name ? String(input.table_name) : undefined;
+
+			if (data === undefined || data === null) {
+				return { __stage_error: true, message: "data is required" };
+			}
+
+			try {
+				const staged = await stageToDoAndRespond(
+					data,
+					doNamespace as Parameters<typeof stageToDoAndRespond>[1],
+					stagingPrefix,
+					tableName ? { tableName } : undefined,
+					undefined,
+					stagingPrefix,
+				);
+
+				return {
+					data_access_id: staged.dataAccessId,
+					tables_created: staged.tablesCreated,
+					total_rows: staged.totalRows,
+					schema: staged.schema,
+					_staging: staged._staging,
+				};
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				return { __stage_error: true, message };
+			}
+		},
+	};
+}
+
+// ---------------------------------------------------------------------------
 // __query_proxy — routes db.queryStaged / api.query calls to the DO
 // ---------------------------------------------------------------------------
 

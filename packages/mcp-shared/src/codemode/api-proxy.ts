@@ -5,7 +5,8 @@
  *   api.get(path, params)  — HTTP GET through server's fetch layer
  *   api.post(path, body, params) — HTTP POST
  *   api.query(dataAccessId, sql) — SQL query against staged data (alias for db.queryStaged)
- *   db.queryStaged(dataAccessId, sql) — SQL query against staged data (StorageContext design)
+ *   db.queryStaged(dataAccessId, sql) — SQL query against staged data
+ *   db.stage(data, tableName?) — stage arbitrary data into SQLite, returns { data_access_id, ... }
  *
  * API keys never enter the isolate — all HTTP goes through the host's apiFetch.
  *
@@ -41,6 +42,19 @@ function __wrapStaged(raw) {
       return target[prop];
     }
   });
+}
+
+/** Stage arbitrary data into SQLite. Returns staging metadata with data_access_id. */
+async function __stageData(data, tableName) {
+  if (data === undefined || data === null) throw new Error("db.stage() requires data (array or object)");
+  var result = await codemode.__stage_proxy({
+    data: data,
+    table_name: tableName || undefined,
+  });
+  if (result && result.__stage_error) {
+    throw new Error("Staging failed: " + (result.message || "Unknown error"));
+  }
+  return result;
 }
 
 /** Query staged data via SQL. Shared implementation for api.query and db.queryStaged. */
@@ -148,6 +162,23 @@ var db = {
    */
   queryStaged: function(dataAccessId, sql) {
     return __queryStaged(dataAccessId, sql);
+  },
+
+  /**
+   * Stage arbitrary data into SQLite. Use this to persist computed/filtered
+   * results so they can be queried with SQL without re-entering the context window.
+   *
+   *   const raw = await api.get('/big-endpoint');
+   *   const filtered = await api.query(raw.data_access_id, "SELECT * FROM data WHERE score > 0.8");
+   *   const staged = await db.stage(filtered.results, 'high_confidence');
+   *   return staged; // { data_access_id, tables_created, total_rows }
+   *
+   * @param data - Array of objects or single object to stage
+   * @param tableName - Optional table name (default: auto-inferred)
+   * @returns { data_access_id, tables_created, total_rows, schema }
+   */
+  stage: function(data, tableName) {
+    return __stageData(data, tableName);
   },
 };
 // --- End API proxy helpers ---

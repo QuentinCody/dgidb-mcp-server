@@ -2,9 +2,36 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v3";
 import { JsonToSqlDO } from "./do.js";
+// DGIdb: Drug-Gene Interaction Database
+// Uses GraphQL API at dgidb.org/api/graphql
+// Migrated to shared RestStagingDO infrastructure (March 2026)
 
 // ========================================
-// API CONFIGURATION - Customize for your GraphQL API
+// TYPES
+// ========================================
+
+interface GraphQLResponse {
+	data?: Record<string, unknown>;
+	errors?: Array<{ message: string; [key: string]: unknown }>;
+}
+
+interface StagingProcessResult {
+	table_count?: number;
+	total_rows?: number;
+}
+
+interface StagingResponse {
+	data_access_id: string;
+	processing_details: StagingProcessResult;
+}
+
+interface SQLQueryResult {
+	quality_analysis_note?: string;
+	[key: string]: unknown;
+}
+
+// ========================================
+// API CONFIGURATION
 // ========================================
 const API_CONFIG = {
 	name: "DGIdbExplorer",
@@ -40,34 +67,14 @@ Top-level queries (genes, drugs) use Relay connections with nodes/edges, but nes
 const datasetRegistry = new Map<string, { created: string; table_count?: number; total_rows?: number }>();
 
 // ========================================
-// ENVIRONMENT INTERFACE
-// ========================================
-interface DGIdbEnv {
-	MCP_HOST?: string;
-	MCP_PORT?: string;
-	JSON_TO_SQL_DO: DurableObjectNamespace;
-	MCP_OBJECT: DurableObjectNamespace;
-}
-
-// ========================================
-// CORE MCP SERVER CLASS - Using McpAgent pattern
+// CORE MCP SERVER CLASS
 // ========================================
 
 export class DGIdbMCP extends McpAgent {
 	server = new McpServer({
 		name: API_CONFIG.name,
 		version: API_CONFIG.version,
-		description: API_CONFIG.description,
-		capabilities: {
-			tools: {
-				listChanged: true
-			}
-		}
 	});
-
-	constructor(ctx: DurableObjectState, env: any) {
-		super(ctx, env);
-	}
 
 	async init() {
 		// Tool #1: GraphQL to SQLite staging
@@ -135,9 +142,9 @@ export class DGIdbMCP extends McpAgent {
 	}
 
 	// ========================================
-	// GRAPHQL CLIENT - Customize headers/auth as needed
+	// GRAPHQL CLIENT
 	// ========================================
-	private async executeGraphQLQuery(query: string, variables?: Record<string, any>): Promise<any> {
+	private async executeGraphQLQuery(query: string, variables?: Record<string, unknown>): Promise<GraphQLResponse> {
 		const headers = {
 			"Content-Type": "application/json",
 			...API_CONFIG.headers
@@ -156,25 +163,23 @@ export class DGIdbMCP extends McpAgent {
 			throw new Error(`HTTP ${response.status}: ${errorText}`);
 		}
 
-		return await response.json();
+		return response.json() as Promise<GraphQLResponse>;
 	}
 
 	private isIntrospectionQuery(query: string): boolean {
 		if (!query) return false;
 
-		// Remove comments and normalize whitespace for analysis
 		const normalizedQuery = query
-			.replace(/\s*#.*$/gm, '') // Remove comments
-			.replace(/\s+/g, ' ')     // Normalize whitespace
+			.replace(/\s*#.*$/gm, '')
+			.replace(/\s+/g, ' ')
 			.trim()
 			.toLowerCase();
 
-		// Check for common introspection patterns
 		const introspectionPatterns = [
-			'__schema',           // Schema introspection
-			'__type',            // Type introspection
-			'__typename',        // Typename introspection
-			'introspectionquery', // Named introspection queries
+			'__schema',
+			'__type',
+			'__typename',
+			'introspectionquery',
 			'getintrospectionquery'
 		];
 
@@ -183,30 +188,24 @@ export class DGIdbMCP extends McpAgent {
 		);
 	}
 
-	private shouldBypassStaging(result: any, originalQuery?: string): boolean {
+	private shouldBypassStaging(result: GraphQLResponse, originalQuery?: string): boolean {
 		if (!result) return true;
 
-		// Bypass if this was an introspection query
 		if (originalQuery && this.isIntrospectionQuery(originalQuery)) {
 			return true;
 		}
 
-		// Bypass if GraphQL reported errors
 		if (result.errors) {
 			return true;
 		}
 
-		// Check if response contains introspection-like data structure
 		if (result.data) {
-			// Common introspection response patterns
 			if (result.data.__schema || result.data.__type) {
 				return true;
 			}
 
-			// Check for schema metadata structures
-			const hasSchemaMetadata = Object.values(result.data).some((value: any) => {
+			const hasSchemaMetadata = Object.values(result.data).some((value: unknown) => {
 				if (value && typeof value === 'object') {
-					// Look for typical schema introspection fields
 					const keys = Object.keys(value);
 					const schemaFields = ['types', 'queryType', 'mutationType', 'subscriptionType', 'directives'];
 					const typeFields = ['name', 'kind', 'description', 'fields', 'interfaces', 'possibleTypes', 'enumValues', 'inputFields'];
@@ -222,7 +221,7 @@ export class DGIdbMCP extends McpAgent {
 			}
 		}
 
-		// Rough size check to avoid storing very small payloads
+		// Skip staging for small responses (<1.5KB) — not worth the DO overhead
 		try {
 			if (JSON.stringify(result).length < 1500) {
 				return true;
@@ -247,10 +246,10 @@ export class DGIdbMCP extends McpAgent {
 	}
 
 	// ========================================
-	// DURABLE OBJECT INTEGRATION - Use this.env directly
+	// DURABLE OBJECT INTEGRATION
 	// ========================================
-	private async stageDataInDurableObject(graphqlResult: any): Promise<any> {
-		const env = this.env as DGIdbEnv;
+	private async stageDataInDurableObject(graphqlResult: GraphQLResponse): Promise<StagingResponse> {
+		const env = this.env as unknown as Cloudflare.Env;
 		if (!env?.JSON_TO_SQL_DO) {
 			throw new Error("JSON_TO_SQL_DO binding not available");
 		}
@@ -270,7 +269,7 @@ export class DGIdbMCP extends McpAgent {
 			throw new Error(`DO staging failed: ${errorText}`);
 		}
 
-		const processingResult = await response.json() as any;
+		const processingResult = await response.json() as StagingProcessResult;
 		datasetRegistry.set(accessId, {
 			created: new Date().toISOString(),
 			table_count: processingResult.table_count,
@@ -282,8 +281,8 @@ export class DGIdbMCP extends McpAgent {
 		};
 	}
 
-	private async executeSQLQuery(dataAccessId: string, sql: string, includeQualityAnalysis: boolean = false): Promise<any> {
-		const env = this.env as DGIdbEnv;
+	private async executeSQLQuery(dataAccessId: string, sql: string, includeQualityAnalysis: boolean = false): Promise<SQLQueryResult> {
+		const env = this.env as unknown as Cloudflare.Env;
 		if (!env?.JSON_TO_SQL_DO) {
 			throw new Error("JSON_TO_SQL_DO binding not available");
 		}
@@ -303,11 +302,9 @@ export class DGIdbMCP extends McpAgent {
 			throw new Error(`SQL execution failed: ${errorText}`);
 		}
 
-		const queryResult = await response.json() as any;
+		const queryResult = await response.json() as SQLQueryResult;
 
-		// Add quality analysis if requested
 		if (includeQualityAnalysis) {
-			// Add placeholder for quality analysis
 			queryResult.quality_analysis_note = "Quality analysis feature available - contact for details";
 		}
 
@@ -315,7 +312,7 @@ export class DGIdbMCP extends McpAgent {
 	}
 
 	// ========================================
-	// ERROR HANDLING - Enhanced for MCP 2025-06-18
+	// ERROR HANDLING
 	// ========================================
 	private createErrorResponse(message: string, error: unknown) {
 		const errorDetails = error instanceof Error ? error.message : String(error);
@@ -350,20 +347,8 @@ export class DGIdbMCP extends McpAgent {
 }
 
 // ========================================
-// CLOUDFLARE WORKERS BOILERPLATE
+// CLOUDFLARE WORKERS FETCH HANDLER
 // ========================================
-interface Env {
-	MCP_HOST?: string;
-	MCP_PORT?: string;
-	JSON_TO_SQL_DO: DurableObjectNamespace;
-	MCP_OBJECT: DurableObjectNamespace;
-	[key: string]: any;
-}
-
-interface ExecutionContext {
-	waitUntil(promise: Promise<any>): void;
-	passThroughOnException(): void;
-}
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

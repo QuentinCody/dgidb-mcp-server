@@ -20,7 +20,7 @@ import { buildCatalogSearchSource } from "./catalog-search";
 import type { ResolvedSpec } from "./openapi-resolver";
 import { buildOpenApiSearchSource } from "./openapi-search";
 import { buildApiProxySource } from "./api-proxy";
-import { createApiProxyTool, createQueryProxyTool, type ApiProxyToolOptions } from "../tools/api-proxy";
+import { createApiProxyTool, createQueryProxyTool, createStageProxyTool, type ApiProxyToolOptions } from "../tools/api-proxy";
 import { createCodeModeResponse, createCodeModeError, ErrorCodes } from "./response";
 
 // ---------------------------------------------------------------------------
@@ -246,6 +246,11 @@ export function createExecuteTool(options: ExecuteToolOptions) {
     ? createQueryProxyTool({ doNamespace })
     : undefined;
 
+  // Build the __stage_proxy handler (only available if DO namespace exists)
+  const stageProxyTool = doNamespace
+    ? createStageProxyTool({ doNamespace, stagingPrefix: prefix })
+    : undefined;
+
   // Build the function map for the executor
   const executorFns: ExecutorFns = {
     __api_proxy: async (args: unknown) => {
@@ -258,6 +263,13 @@ export function createExecuteTool(options: ExecuteToolOptions) {
       }
       const input = (args ?? {}) as Record<string, unknown>;
       return queryProxyTool.handler(input, {} as any);
+    },
+    __stage_proxy: async (args: unknown) => {
+      if (!stageProxyTool) {
+        return { __stage_error: true, message: "Data staging is not available (no DO namespace configured)" };
+      }
+      const input = (args ?? {}) as Record<string, unknown>;
+      return stageProxyTool.handler(input, {} as any);
     },
   };
 
@@ -285,6 +297,9 @@ export function createExecuteTool(options: ExecuteToolOptions) {
       `For advanced use: api.query(data_access_id, sql) and db.queryStaged(data_access_id, sql) are available to query staged data ` +
       `within the same execution (returns {results, row_count}, max 1000 rows, SELECT only). ` +
       `This is useful when you need to aggregate or filter staged data before returning.\n\n` +
+      `SCRATCHPAD: db.stage(data, tableName?) stages any array/object into SQLite and returns {data_access_id, tables_created, total_rows}. ` +
+      `Use this to persist computed or filtered results for SQL queries without re-entering the context window. ` +
+      `Example: const filtered = await api.query(id, "SELECT * WHERE score > 0.8"); const saved = await db.stage(filtered.results, "top_hits");\n\n` +
       `IMPORTANT: Use limit/pagination params to keep responses small. If you need large datasets, let them auto-stage and return the staging info.` +
       notesSection,
     schema: {
