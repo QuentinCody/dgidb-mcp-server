@@ -2,6 +2,7 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v3";
 import { JsonToSqlDO } from "./do.js";
+import { registerCodeMode } from "./tools/code-mode.js";
 // DGIdb: Drug-Gene Interaction Database
 // Uses GraphQL API at dgidb.org/api/graphql
 // Migrated to shared RestStagingDO infrastructure (March 2026)
@@ -139,6 +140,12 @@ export class DGIdbMCP extends McpAgent {
 				}
 			}
 		);
+
+		// Register Code Mode (GraphQL execute tool)
+		const env = this.env as unknown as { CODE_MODE_LOADER?: { get: (...args: unknown[]) => unknown } };
+		if (env.CODE_MODE_LOADER) {
+			registerCodeMode(this.server, this.env as unknown as Parameters<typeof registerCodeMode>[1]);
+		}
 	}
 
 	// ========================================

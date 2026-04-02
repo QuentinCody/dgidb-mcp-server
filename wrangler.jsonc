@@ -33,6 +33,9 @@
 	"alias": {
 		"ai": "./src/ai-stub.ts"
 	},
+	"worker_loaders": [
+		{ "binding": "CODE_MODE_LOADER" }
+	],
 	"observability": {
 		"enabled": true
 	}
