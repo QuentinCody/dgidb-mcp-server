@@ -1,32 +1,46 @@
-/**
- * For more details on how to configure Wrangler, refer to:
- * https://developers.cloudflare.com/workers/wrangler/configuration/
- */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "dgidb-mcp-server",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-03-10",
-	"compatibility_flags": ["nodejs_compat"],
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
 	"migrations": [
 		{
-			"new_sqlite_classes": ["MyMCP"],
+			"new_sqlite_classes": [
+				"MyMCP"
+			],
 			"tag": "v1"
 		},
 		{
 			"tag": "v2-json-to-sql-do",
-			"new_sqlite_classes": ["JsonToSqlDO"]
+			"new_sqlite_classes": [
+				"JsonToSqlDO"
+			]
+		},
+		{
+			"tag": "v3-purge-mymcp",
+			"deleted_classes": [
+				"MyMCP"
+			]
+		},
+		{
+			"tag": "v4-readd-mymcp",
+			"new_sqlite_classes": [
+				"MyMCP"
+			]
 		}
 	],
 	"durable_objects": {
 		"bindings": [
 			{
-				"name": "MCP_OBJECT",
-				"class_name": "MyMCP"
-			},
-			{
 				"name": "JSON_TO_SQL_DO",
 				"class_name": "JsonToSqlDO"
+			},
+			{
+				"class_name": "MyMCP",
+				"name": "MCP_OBJECT"
 			}
 		]
 	},
@@ -34,7 +48,9 @@
 		"ai": "./src/ai-stub.ts"
 	},
 	"worker_loaders": [
-		{ "binding": "CODE_MODE_LOADER" }
+		{
+			"binding": "CODE_MODE_LOADER"
+		}
 	],
 	"observability": {
 		"enabled": true
