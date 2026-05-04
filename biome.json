@@ -24,7 +24,7 @@
 			"suspicious": {
 				"noExplicitAny": "off",
 				"noDebugger": "off",
-				"noConsoleLog": "off",
+				"noConsole": "off",
 				"noConfusingVoidType": "off"
 			},
 			"style": {
