@@ -46,6 +46,10 @@ function createDgidbGqlFetch(): GraphqlFetchFn {
 interface DgidbCodeModeEnv {
 	JSON_TO_SQL_DO: DurableObjectNamespace;
 	CODE_MODE_LOADER: { get: (...args: unknown[]) => unknown };
+	/** Cross-script binding to the shared workspace data plane (ADR-006). Optional so
+	 * the worker's hand-written Env (which omits it) still satisfies this interface;
+	 * present at runtime via wrangler.jsonc. */
+	WORKSPACE_DO?: DurableObjectNamespace;
 }
 
 /**
@@ -59,11 +63,14 @@ export function registerCodeMode(
 
 	const executeTool = createGraphqlExecuteTool({
 		prefix: "dgidb",
+		// Verifiable provenance: dgidb_execute results carry a _meta.citation.
+		source: { id: "dgidb", name: "DGIdb", url: "https://www.dgidb.org" },
 		apiName: "DGIdb",
 		gqlFetch,
 		doNamespace: env.JSON_TO_SQL_DO,
 		loader: env.CODE_MODE_LOADER,
 		preamble: DGIDB_PREAMBLE,
+		workspaceNamespace: env.WORKSPACE_DO,
 	});
 
 	executeTool.register(server as unknown as { tool: (...args: unknown[]) => void });

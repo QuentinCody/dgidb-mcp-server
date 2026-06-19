@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v3";
 import { JsonToSqlDO } from "./do.js";
 import { registerCodeMode } from "./tools/code-mode.js";
+import { createQueryDataHandler, createGetSchemaHandler } from "@bio-mcp/shared/staging/utils";
 // DGIdb: Drug-Gene Interaction Database
 // Uses GraphQL API at dgidb.org/api/graphql
 // Migrated to shared RestStagingDO infrastructure (March 2026)
@@ -139,6 +140,58 @@ export class DGIdbMCP extends McpAgent {
 					return this.createErrorResponse("SQL execution failed", error);
 				}
 			}
+		);
+
+		// Shared workspace-aware query/schema tools (ADR-006 Phase 0). The legacy
+		// dgidb_query_sql tool stays as-is; these add WorkspaceDO routing so DGIdb
+		// datasets can be JOINed against other servers in a shared workspace.
+		const dgidbEnv = this.env as unknown as { JSON_TO_SQL_DO?: unknown; WORKSPACE_DO?: unknown };
+		const queryDataHandler = createQueryDataHandler("JSON_TO_SQL_DO", "dgidb", {
+			workspaceNamespace: dgidbEnv.WORKSPACE_DO,
+		});
+		this.server.registerTool(
+			"dgidb_query_data",
+			{
+				title: "Query Staged DGIdb Data",
+				description:
+					"Query staged DGIdb data using SQL. Pass `workspace` to query the shared cross-server workspace DO instead (JOIN other servers datasets).",
+				inputSchema: {
+					data_access_id: z.string().min(1).optional().describe("Data access ID for the staged dataset (omit in workspace mode)"),
+					sql: z.string().min(1).describe("SQL query to execute against the staged data"),
+					limit: z.number().int().positive().max(10000).default(100).optional().describe("Maximum number of rows to return (default: 100)"),
+					workspace: z.string().min(1).optional().describe("Shared workspace id — query the cross-server workspace DO. Omit for per-server queries."),
+				},
+			},
+			async (args, extra) =>
+				queryDataHandler(
+					args as Record<string, unknown>,
+					(extra as { env?: Record<string, unknown> })?.env ?? (this.env as unknown as Record<string, unknown>),
+				),
+		);
+
+		const getSchemaHandler = createGetSchemaHandler("JSON_TO_SQL_DO", "dgidb", {
+			workspaceNamespace: dgidbEnv.WORKSPACE_DO,
+		});
+		this.server.registerTool(
+			"dgidb_get_schema",
+			{
+				title: "Get Staged DGIdb Data Schema",
+				description:
+					"Get schema information for staged DGIdb data. Omit data_access_id to list staged datasets in this session. Pass `workspace` to read the shared cross-server workspace catalog.",
+				inputSchema: {
+					data_access_id: z.string().min(1).optional().describe("Data access ID; if omitted, lists all staged datasets in this session."),
+					workspace: z.string().min(1).optional().describe("Shared workspace id — read the cross-server workspace catalog."),
+					dataset: z.string().min(1).optional().describe("When workspace is set, scope schema to a single dataset (e.g. dgidb)."),
+				},
+			},
+			async (args, extra) =>
+				getSchemaHandler(
+					args as Record<string, unknown>,
+					(extra as { env?: Record<string, unknown> })?.env ?? (this.env as unknown as Record<string, unknown>),
+					// Pass the full extra so the listing scope matches the staging scope
+					// (getRequestScope: _meta / mcp-chat-id header, then sessionId).
+					extra as Record<string, unknown>,
+				),
 		);
 
 		// Register Code Mode (GraphQL execute tool)

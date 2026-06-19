@@ -41,6 +41,11 @@
 			{
 				"class_name": "MyMCP",
 				"name": "MCP_OBJECT"
+			},
+			{
+				"name": "WORKSPACE_DO",
+				"class_name": "WorkspaceDO",
+				"script_name": "workspace-do"
 			}
 		]
 	},
