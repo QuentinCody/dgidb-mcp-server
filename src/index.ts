@@ -4,6 +4,11 @@ import { z } from "zod/v3";
 import { JsonToSqlDO } from "./do.js";
 import { registerCodeMode } from "./tools/code-mode.js";
 import { createQueryDataHandler, createGetSchemaHandler } from "@bio-mcp/shared/staging/utils";
+import {
+	buildInlineStructuredContent,
+	buildStagedStructuredContent,
+	type DgidbQuery,
+} from "./lib/passthrough-citation.js";
 // DGIdb: Drug-Gene Interaction Database
 // Uses GraphQL API at dgidb.org/api/graphql
 // Migrated to shared RestStagingDO infrastructure (March 2026)
@@ -90,13 +95,20 @@ export class DGIdbMCP extends McpAgent {
 			async ({ query, variables }) => {
 				try {
 					const graphqlResult = await this.executeGraphQLQuery(query, variables);
+					const citationQuery: DgidbQuery = { query, variables };
 
 					if (this.shouldBypassStaging(graphqlResult, query)) {
+						const serialized = JSON.stringify(graphqlResult);
 						return {
 							content: [{
 								type: "text" as const,
-								text: JSON.stringify(graphqlResult)
+								text: serialized
 							}],
+							structuredContent: await buildInlineStructuredContent(
+								citationQuery,
+								graphqlResult,
+								serialized.length,
+							),
 							isError: false,
 						};
 					}
@@ -107,6 +119,11 @@ export class DGIdbMCP extends McpAgent {
 							type: "text" as const,
 							text: JSON.stringify(stagingResult)
 						}],
+						structuredContent: await buildStagedStructuredContent(
+							citationQuery,
+							graphqlResult,
+							stagingResult,
+						),
 						isError: false,
 					};
 

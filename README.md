@@ -34,7 +34,7 @@ Claude will then use this server to find the answers in the DGIdb and present th
 
 Your Claude Desktop application needs to be told where to find this DGIdb server. This is usually done by editing a configuration file for Claude Desktop.
 
-A technical user or administrator would typically handle the deployment of the server and provide you with a specific URL (web address). For example, the server might be available at an address like: `https://dgidb-mcp-server.your-organization.workers.dev/sse`.
+A technical user or administrator would typically handle the deployment of the server and provide you with a specific URL (web address). For example, the server might be available at an address like: `https://dgidb-mcp-server.your-organization.workers.dev/mcp`.
 
 The configuration in Claude Desktop would then look something like this. You would add the "dgidb" section within the `mcpServers` part of your Claude Desktop configuration file:
 
@@ -47,7 +47,7 @@ The configuration in Claude Desktop would then look something like this. You wou
       "command": "npx",
       "args": [
         "mcp-remote",
-        "https://dgidb-mcp-server.quentincody.workers.dev/sse" // <-- This URL needs to be the actual address of YOUR deployed DGIdb MCP server
+        "https://dgidb-mcp-server.quentincody.workers.dev/mcp" // <-- This URL needs to be the actual address of YOUR deployed DGIdb MCP server
       ]
     }
 
@@ -57,7 +57,7 @@ The configuration in Claude Desktop would then look something like this. You wou
 ```
 
 **Important:**
-*   The URL `https://dgidb-mcp-server.quentincody.workers.dev/sse` in the example above is illustrative. You will need to replace it with the actual URL where *your* instance of the DGIdb MCP server is running.
+*   The URL `https://dgidb-mcp-server.quentincody.workers.dev/mcp` in the example above is illustrative. You will need to replace it with the actual URL where *your* instance of the DGIdb MCP server is running.
 *   After updating the configuration, you usually need to restart Claude Desktop for the changes to take effect.
 
 Once configured, the DGIdb tool should become available within Claude, allowing you to query the database easily.
@@ -73,6 +73,6 @@ If you are a technical user and need to deploy this server (e.g., on Cloudflare 
     The server code is in `src/index.ts`. This file defines how the server connects to DGIdb and what "tools" it provides to MCP clients.
 
 3.  **Connecting to Other Clients (like AI Playground):**
-    Once deployed, you can also connect to your MCP server from other clients like the Cloudflare AI Playground by providing its URL (e.g., `https://your-dgidb-server-name.your-account.workers.dev/sse`).
+    Once deployed, you can also connect to your MCP server from other clients like the Cloudflare AI Playground by providing its URL (e.g., `https://your-dgidb-server-name.your-account.workers.dev/mcp`).
 
 This DGIdb MCP Server uses the publicly available DGIdb GraphQL API at `https://dgidb.org/api/graphql`.

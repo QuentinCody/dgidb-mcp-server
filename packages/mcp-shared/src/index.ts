@@ -50,6 +50,10 @@ export {
 	type VerifyResult,
 } from "./provenance/provenance";
 export {
+	buildPassthroughCitation,
+	type PassthroughCitationArgs,
+} from "./provenance/passthrough-citation";
+export {
 	createVerifyCitationTool,
 	type VerifyCitationToolResult,
 	type VerifyCitationSchema,
