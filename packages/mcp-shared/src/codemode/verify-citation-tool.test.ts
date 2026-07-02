@@ -76,7 +76,10 @@ describe("createVerifyCitationTool", () => {
 		tool.register(register);
 		const handler = handlers.get("verify_citation")!;
 
-		const res = await handler({ expected_hash, data: { gene: "EGFR", score: 0.01 } });
+		const res = await handler({
+			expected_hash,
+			data: { gene: "EGFR", score: 0.01 },
+		});
 		// Verification failure is a successful tool call with a negative verdict —
 		// not a tool error.
 		expect(res.isError).toBeUndefined();
@@ -111,7 +114,12 @@ describe("createVerifyCitationTool", () => {
 
 		const data = { ok: true };
 		const expected_hash = await sha256Hex(canonicalJson(data));
-		const res = await handlers.get("mcp_verify_citation")!({ expected_hash, data });
-		expect((res.structuredContent?.data as { verified: boolean }).verified).toBe(true);
+		const res = await handlers.get("mcp_verify_citation")!({
+			expected_hash,
+			data,
+		});
+		expect(
+			(res.structuredContent?.data as { verified: boolean }).verified,
+		).toBe(true);
 	});
 });

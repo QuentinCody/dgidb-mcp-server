@@ -122,7 +122,9 @@ export interface ChainVerifyResult {
  * payload + entry hash, asserts gapless monotonic seq, and asserts each row
  * links to its predecessor. Returns the first failure with its seq.
  */
-export async function verifyChainRows(rows: SnapshotRow[]): Promise<ChainVerifyResult> {
+export async function verifyChainRows(
+	rows: SnapshotRow[],
+): Promise<ChainVerifyResult> {
 	let prev = GENESIS_HASH;
 	let expectedSeq = 1;
 	for (const row of rows) {
@@ -220,11 +222,18 @@ async function doAppend(
 		)
 	`;
 
-	return { seq: row.seq, entry_hash: row.entry_hash, content_hash: row.content_hash };
+	return {
+		seq: row.seq,
+		entry_hash: row.entry_hash,
+		content_hash: row.content_hash,
+	};
 }
 
 /** Read a subscription's full chain from SQLite and verify it end to end. */
-export async function verifySnapshotChain(sql: SqlRunner, subscriptionId: string): Promise<ChainVerifyResult> {
+export async function verifySnapshotChain(
+	sql: SqlRunner,
+	subscriptionId: string,
+): Promise<ChainVerifyResult> {
 	const rows = sql<SnapshotRow>`
 		SELECT * FROM monitor_snapshot WHERE subscription_id = ${subscriptionId} ORDER BY seq ASC
 	`;

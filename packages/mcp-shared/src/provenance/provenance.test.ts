@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-	type SourceDescriptor,
 	buildCitation,
 	canonicalJson,
+	type SourceDescriptor,
 	sha256Hex,
 	verifyCitation,
 	verifyResultHash,
@@ -54,7 +54,9 @@ describe("buildCitation", () => {
 		expect(c.tool).toBe("opentargets_execute");
 		expect(c.retrieved_at).toBe(TS);
 		expect(c.query_hash).toMatch(/^[0-9a-f]{64}$/);
-		expect(c.result_hash).toBe(await sha256Hex(canonicalJson({ name: "EGFR" })));
+		expect(c.result_hash).toBe(
+			await sha256Hex(canonicalJson({ name: "EGFR" })),
+		);
 		expect(c.record_count).toBe(1);
 		// The human/agent-readable line names the source and embeds the integrity anchor.
 		expect(c.text).toContain("Open Targets");
@@ -63,7 +65,13 @@ describe("buildCitation", () => {
 	});
 
 	it("is content-addressed: same result → same hash, different result → different hash", async () => {
-		const base = { source: SOURCE, server: "opentargets", tool: "opentargets_execute", query: "q", retrievedAt: TS };
+		const base = {
+			source: SOURCE,
+			server: "opentargets",
+			tool: "opentargets_execute",
+			query: "q",
+			retrievedAt: TS,
+		};
 		const a = await buildCitation({ ...base, result: { x: 1 } });
 		const a2 = await buildCitation({ ...base, result: { x: 1 } });
 		const b = await buildCitation({ ...base, result: { x: 2 } });
@@ -72,7 +80,13 @@ describe("buildCitation", () => {
 	});
 
 	it("hashes the query so identical data from a different question is distinguishable", async () => {
-		const base = { source: SOURCE, server: "opentargets", tool: "opentargets_execute", result: { x: 1 }, retrievedAt: TS };
+		const base = {
+			source: SOURCE,
+			server: "opentargets",
+			tool: "opentargets_execute",
+			result: { x: 1 },
+			retrievedAt: TS,
+		};
 		const a = await buildCitation({ ...base, query: "question-1" });
 		const b = await buildCitation({ ...base, query: "question-2" });
 		expect(a.query_hash).not.toBe(b.query_hash);
@@ -122,7 +136,10 @@ describe("verifyResultHash", () => {
 
 describe("verifyCitation", () => {
 	it("round-trips: a real buildCitation() output verifies true against its data", async () => {
-		const result = { gene: "EGFR", associations: [{ disease: "NSCLC", score: 0.92 }] };
+		const result = {
+			gene: "EGFR",
+			associations: [{ disease: "NSCLC", score: 0.92 }],
+		};
 		const c = await buildCitation({
 			source: SOURCE,
 			server: "opentargets",

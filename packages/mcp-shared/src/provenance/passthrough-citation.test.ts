@@ -53,12 +53,18 @@ describe("buildPassthroughCitation", () => {
 
 	it("produces a re-checkable result_hash (same bytes → same hash)", async () => {
 		const a = await buildPassthroughCitation({
-			source: SOURCE, server: "civic", tool: "civic_graphql_query",
-			query: { q: 1 }, result: { x: [1, 2, 3] },
+			source: SOURCE,
+			server: "civic",
+			tool: "civic_graphql_query",
+			query: { q: 1 },
+			result: { x: [1, 2, 3] },
 		});
 		const b = await buildPassthroughCitation({
-			source: SOURCE, server: "civic", tool: "civic_graphql_query",
-			query: { q: 2 }, result: { x: [1, 2, 3] },
+			source: SOURCE,
+			server: "civic",
+			tool: "civic_graphql_query",
+			query: { q: 2 },
+			result: { x: [1, 2, 3] },
 		});
 		expect(a.citation?.result_hash).toBe(b.citation?.result_hash);
 		expect(a.citation?.query_hash).not.toBe(b.citation?.query_hash);

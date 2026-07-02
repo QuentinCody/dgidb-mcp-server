@@ -1,52 +1,57 @@
 // interlinked-tdd: exempt -- re-export barrel, no testable surface
 /** Monitoring primitive — public surface (engine + provenance ledger). */
 
-export type {
-	SavedQuery,
-	TableSpec,
-	MonitorProfile,
-	ChangeKind,
-	Materiality,
-	FieldDelta,
-	RowChange,
-	TableSummary,
-	SnapshotDiff,
-	SourceModule,
-} from "./types";
 export {
-	type RowSet,
-	resolvePath,
+	canonicalValue,
 	cleanResult,
 	extractRowSets,
+	KEY_SEP,
+	keyedValueMap,
+	type RowSet,
+	reparse,
+	resolvePath,
 	rowKey,
 	selectValueFields,
-	reparse,
-	canonicalValue,
-	keyedValueMap,
 	snapshotHash,
-	KEY_SEP,
 } from "./canonicalize";
-export { diffTable, diffSnapshots } from "./diff";
-export { defaultMateriality, classifyChanges } from "./materiality";
-export { type KeyColumnStat, autoDetectKey } from "./key-detect";
+export { diffSnapshots, diffTable } from "./diff";
 export {
-	GENESIS_HASH,
-	type SqlRunner,
-	type SnapshotInput,
-	type SnapshotRow,
+	buildToolCall,
+	callTool,
+	type McpRpcResponse,
+	type McpRpcStub,
+	parseToolResult,
+} from "./internal-call";
+export { autoDetectKey, type KeyColumnStat } from "./key-detect";
+export { classifyChanges, defaultMateriality } from "./materiality";
+export {
+	type QueryRunner,
+	type RunOnceInput,
+	type RunOnceResult,
+	runOnce,
+} from "./run-once";
+export {
+	appendSnapshot,
+	buildSnapshotRow,
 	type ChainVerifyResult,
 	computeEntryHash,
-	buildSnapshotRow,
+	GENESIS_HASH,
+	type SnapshotInput,
+	type SnapshotRow,
+	type SqlRunner,
 	verifyChainRows,
-	appendSnapshot,
 	verifySnapshotChain,
 } from "./snapshot-chain";
-export { type QueryRunner, type RunOnceInput, type RunOnceResult, runOnce } from "./run-once";
-export {
-	type McpRpcStub,
-	type McpRpcResponse,
-	buildToolCall,
-	parseToolResult,
-	callTool,
-} from "./internal-call";
-export { SOURCES, fdaOrangeBook } from "./sources/index";
+export { fdaOrangeBook, SOURCES } from "./sources/index";
+export type {
+	ChangeKind,
+	FieldDelta,
+	Materiality,
+	MonitorProfile,
+	RowChange,
+	SavedQuery,
+	SnapshotDiff,
+	SourceModule,
+	TableSpec,
+	TableSummary,
+} from "./types";

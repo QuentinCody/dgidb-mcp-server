@@ -14,7 +14,11 @@
 
 import { z } from "zod";
 import { verifyResultHash } from "../provenance/provenance";
-import { createCodeModeError, createCodeModeResponse, ErrorCodes } from "./response";
+import {
+	createCodeModeError,
+	createCodeModeResponse,
+	ErrorCodes,
+} from "./response";
 
 /** The Zod input schema for the verify-citation tool. */
 export interface VerifyCitationSchema {
@@ -84,7 +88,10 @@ export function createVerifyCitationTool(): VerifyCitationToolResult {
 			: `NOT verified: hash mismatch. expected sha256:${expected_hash.slice(0, 12)}, ` +
 				`got sha256:${actual_hash.slice(0, 12)}. The cited data does not match.`;
 
-		return createCodeModeResponse({ verified, expected_hash, actual_hash }, { textSummary });
+		return createCodeModeResponse(
+			{ verified, expected_hash, actual_hash },
+			{ textSummary },
+		);
 	}
 
 	return {
@@ -94,7 +101,8 @@ export function createVerifyCitationTool(): VerifyCitationToolResult {
 		register(server: { tool: (...args: unknown[]) => void }) {
 			// Return handle()'s promise directly (no async wrapper) — the MCP SDK
 			// awaits the handler, so the promise is consumed, not floating.
-			const toolHandler = (input: { expected_hash: string; data: unknown }) => handle(input);
+			const toolHandler = (input: { expected_hash: string; data: unknown }) =>
+				handle(input);
 			for (const name of [TOOL_NAME, ALIAS_NAME]) {
 				server.tool(name, DESCRIPTION, schema, toolHandler);
 			}

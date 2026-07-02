@@ -7,10 +7,20 @@
  * unit-testable with a fake (the DO supplies the real in-fabric caller).
  */
 
-import { type RowSet, cleanResult, extractRowSets, snapshotHash } from "./canonicalize";
+import {
+	cleanResult,
+	extractRowSets,
+	type RowSet,
+	snapshotHash,
+} from "./canonicalize";
 import { diffSnapshots } from "./diff";
 import { classifyChanges } from "./materiality";
-import type { RowChange, SavedQuery, SnapshotDiff, SourceModule } from "./types";
+import type {
+	RowChange,
+	SavedQuery,
+	SnapshotDiff,
+	SourceModule,
+} from "./types";
 
 /** Re-run {server,tool,params} in-fabric and return the parsed tool result. */
 export type QueryRunner = (query: SavedQuery) => Promise<unknown>;
@@ -49,7 +59,8 @@ export async function runOnce(args: RunOnceInput): Promise<RunOnceResult> {
 	const cleaned = cleanResult(raw, args.source.profile);
 	const rowSets = extractRowSets(raw, args.source.profile);
 	const contentHash = await snapshotHash(rowSets, args.source.profile);
-	const unchanged = args.priorContentHash != null && contentHash === args.priorContentHash;
+	const unchanged =
+		args.priorContentHash != null && contentHash === args.priorContentHash;
 	const diff: SnapshotDiff = args.priorRowSets
 		? diffSnapshots(args.priorRowSets, rowSets, args.source.profile)
 		: { changes: [], summary: [] };

@@ -103,7 +103,9 @@ function formatCitation(
 	resultHash: string,
 	recordCount: number | undefined,
 ): string {
-	const name = source.version ? `${source.name} ${source.version}` : source.name;
+	const name = source.version
+		? `${source.name} ${source.version}`
+		: source.name;
 	let line = `${name} — ${tool}, retrieved ${retrievedAt}`;
 	if (typeof recordCount === "number") {
 		line += `, ${recordCount} record${recordCount === 1 ? "" : "s"}`;
@@ -114,7 +116,9 @@ function formatCitation(
 }
 
 /** Build a verifiable citation for a tool result. */
-export async function buildCitation(input: BuildCitationInput): Promise<Citation> {
+export async function buildCitation(
+	input: BuildCitationInput,
+): Promise<Citation> {
 	const query_hash = await sha256Hex(canonicalJson(input.query));
 	const result_hash = await sha256Hex(canonicalJson(input.result));
 	return {
@@ -124,9 +128,19 @@ export async function buildCitation(input: BuildCitationInput): Promise<Citation
 		retrieved_at: input.retrievedAt,
 		query_hash,
 		result_hash,
-		...(input.recordCount !== undefined ? { record_count: input.recordCount } : {}),
-		...(input.dataAccessId !== undefined ? { data_access_id: input.dataAccessId } : {}),
-		text: formatCitation(input.source, input.tool, input.retrievedAt, result_hash, input.recordCount),
+		...(input.recordCount !== undefined
+			? { record_count: input.recordCount }
+			: {}),
+		...(input.dataAccessId !== undefined
+			? { data_access_id: input.dataAccessId }
+			: {}),
+		text: formatCitation(
+			input.source,
+			input.tool,
+			input.retrievedAt,
+			result_hash,
+			input.recordCount,
+		),
 	};
 }
 

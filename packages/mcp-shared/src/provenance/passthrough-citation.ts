@@ -2,7 +2,11 @@
 // (`<server>_graphql_query`). Mirrors what the Code Mode `*_execute` tools
 // attach via buildCitation, so a query routed through a passthrough still
 // carries `_meta.citation` and shows up in the chat Sources strip.
-import { buildCitation, type Citation, type SourceDescriptor } from "./provenance";
+import {
+	buildCitation,
+	type Citation,
+	type SourceDescriptor,
+} from "./provenance";
 
 export interface PassthroughCitationArgs {
 	/** Source descriptor; when absent, no citation is produced (returns {}). */

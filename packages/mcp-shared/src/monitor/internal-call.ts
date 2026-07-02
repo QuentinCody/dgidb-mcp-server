@@ -28,8 +28,17 @@ export interface McpRpcResponse {
 }
 
 /** Build a JSON-RPC `tools/call` message for one tool invocation. */
-export function buildToolCall(tool: string, params: Record<string, unknown>, id: number) {
-	return { jsonrpc: "2.0", id, method: "tools/call", params: { name: tool, arguments: params } };
+export function buildToolCall(
+	tool: string,
+	params: Record<string, unknown>,
+	id: number,
+) {
+	return {
+		jsonrpc: "2.0",
+		id,
+		method: "tools/call",
+		params: { name: tool, arguments: params },
+	};
 }
 
 /**
@@ -38,12 +47,16 @@ export function buildToolCall(tool: string, params: Record<string, unknown>, id:
  * error, so the caller never hashes an error envelope as if it were data.
  */
 export function parseToolResult(resp: McpRpcResponse | undefined): unknown {
-	if (!resp) throw new Error("monitor in-fabric call: empty response (notification?)");
-	if (resp.error) throw new Error(`monitor in-fabric call failed: ${resp.error.message}`);
+	if (!resp)
+		throw new Error("monitor in-fabric call: empty response (notification?)");
+	if (resp.error)
+		throw new Error(`monitor in-fabric call failed: ${resp.error.message}`);
 	const result = resp.result;
 	if (!result) throw new Error("monitor in-fabric call: missing result");
 	if (result.isError) {
-		throw new Error(`monitored tool returned an error: ${result.content?.[0]?.text ?? "tool error"}`);
+		throw new Error(
+			`monitored tool returned an error: ${result.content?.[0]?.text ?? "tool error"}`,
+		);
 	}
 	if (result.structuredContent !== undefined) return result.structuredContent;
 	const text = result.content?.[0]?.text;
@@ -54,7 +67,9 @@ export function parseToolResult(resp: McpRpcResponse | undefined): unknown {
 			return text;
 		}
 	}
-	throw new Error("monitor in-fabric call: no structuredContent or text content");
+	throw new Error(
+		"monitor in-fabric call: no structuredContent or text content",
+	);
 }
 
 /** Call a tool on a target server's MyMCP DO stub and return its structuredContent. */

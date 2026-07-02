@@ -15,7 +15,8 @@ import type { Materiality, RowChange } from "./types";
  */
 export function defaultMateriality(change: RowChange): Materiality {
 	if (change.kind === "removed") return "high";
-	if (change.kind === "changed") return change.fields && change.fields.length > 0 ? "high" : "info";
+	if (change.kind === "changed")
+		return change.fields && change.fields.length > 0 ? "high" : "info";
 	return "info";
 }
 

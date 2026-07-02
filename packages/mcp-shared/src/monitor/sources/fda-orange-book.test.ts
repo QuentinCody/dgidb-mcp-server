@@ -32,20 +32,33 @@ describe("fdaOrangeBook.classify", () => {
 	if (!classify) throw new Error("fdaOrangeBook must define classify");
 
 	it("flags a removed exclusivity as the high-materiality cliff", () => {
-		expect(classify(change({ table: "exclusivity", kind: "removed" })).materiality).toBe("high");
+		expect(
+			classify(change({ table: "exclusivity", kind: "removed" })).materiality,
+		).toBe("high");
 	});
 	it("flags a removed patent as high", () => {
-		expect(classify(change({ table: "patents", kind: "removed" })).materiality).toBe("high");
+		expect(
+			classify(change({ table: "patents", kind: "removed" })).materiality,
+		).toBe("high");
 	});
 	it("flags a patent delist flip as high", () => {
-		const c = change({ kind: "changed", fields: [{ field: "Delist_Flag", before: "", after: "Y" }] });
+		const c = change({
+			kind: "changed",
+			fields: [{ field: "Delist_Flag", before: "", after: "Y" }],
+		});
 		expect(classify(c).materiality).toBe("high");
 		expect(classify(c).label.toLowerCase()).toContain("delist");
 	});
 	it("flags an expiry-date move as high", () => {
 		const c = change({
 			kind: "changed",
-			fields: [{ field: "Patent_Expire_Date_Text", before: "Nov 21, 2026", after: "May 21, 2027" }],
+			fields: [
+				{
+					field: "Patent_Expire_Date_Text",
+					before: "Nov 21, 2026",
+					after: "May 21, 2027",
+				},
+			],
 		});
 		expect(classify(c).materiality).toBe("high");
 	});
@@ -58,7 +71,10 @@ describe("fdaOrangeBook.classify", () => {
 		expect(r.label.toLowerCase()).toContain("exclusivity");
 	});
 	it("treats a non-cliff field change as informational (Updated)", () => {
-		const c = change({ kind: "changed", fields: [{ field: "Drug_Substance_Flag", before: "Y", after: "N" }] });
+		const c = change({
+			kind: "changed",
+			fields: [{ field: "Drug_Substance_Flag", before: "Y", after: "N" }],
+		});
 		expect(classify(c).materiality).toBe("info");
 		expect(classify(c).label).toContain("Updated");
 	});

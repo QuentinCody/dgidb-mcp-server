@@ -431,6 +431,14 @@ export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 
+		// Health check endpoint
+		if (url.pathname === "/health") {
+			return new Response("ok", {
+				status: 200,
+				headers: { "content-type": "text/plain" },
+			});
+		}
+
 		// Handle standard MCP requests via Streamable HTTP
 		if (url.pathname.startsWith("/mcp")) {
 			return DGIdbMCP.serve("/mcp", { binding: "MCP_OBJECT" }).fetch(request, env, ctx);

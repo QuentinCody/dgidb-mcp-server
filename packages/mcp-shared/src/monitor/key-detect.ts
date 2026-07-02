@@ -42,7 +42,11 @@ const KEY_HINTS = new Set([
 /** Infer a single-column business key, or null if none is a clean unique key. */
 export function autoDetectKey(stats: KeyColumnStat[]): string[] | null {
 	const unique = stats.filter(
-		(s) => s.rowCount > 0 && s.distinctCount === s.rowCount && s.nullCount === 0 && s.column !== "_rowid",
+		(s) =>
+			s.rowCount > 0 &&
+			s.distinctCount === s.rowCount &&
+			s.nullCount === 0 &&
+			s.column !== "_rowid",
 	);
 	if (unique.length === 0) return null;
 	const hinted = unique.find((s) => KEY_HINTS.has(s.column.toLowerCase()));

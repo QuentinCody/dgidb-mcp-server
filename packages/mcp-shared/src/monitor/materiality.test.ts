@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { classifyChanges, defaultMateriality } from "./materiality";
 import type { RowChange } from "./types";
 
-const make = (kind: RowChange["kind"], fields?: RowChange["fields"]): RowChange => ({
+const make = (
+	kind: RowChange["kind"],
+	fields?: RowChange["fields"],
+): RowChange => ({
 	table: "t",
 	kind,
 	key: "k",
@@ -18,7 +21,11 @@ describe("defaultMateriality", () => {
 		expect(defaultMateriality(make("added"))).toBe("info");
 	});
 	it("treats a changed row with field deltas as high, without as info", () => {
-		expect(defaultMateriality(make("changed", [{ field: "v", before: 1, after: 2 }]))).toBe("high");
+		expect(
+			defaultMateriality(
+				make("changed", [{ field: "v", before: 1, after: 2 }]),
+			),
+		).toBe("high");
 		expect(defaultMateriality(make("changed", []))).toBe("info");
 	});
 });

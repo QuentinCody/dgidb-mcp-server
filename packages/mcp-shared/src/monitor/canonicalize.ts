@@ -32,7 +32,8 @@ export function resolvePath(value: unknown, path: string): unknown {
 
 /** Remove top-level envelope / meta keys that change without semantic meaning. */
 export function cleanResult(result: unknown, profile: MonitorProfile): unknown {
-	if (result === null || typeof result !== "object" || Array.isArray(result)) return result;
+	if (result === null || typeof result !== "object" || Array.isArray(result))
+		return result;
 	const strip = new Set(profile.stripKeys ?? []);
 	const out: Record<string, unknown> = {};
 	for (const [k, v] of Object.entries(result as Record<string, unknown>)) {
@@ -42,13 +43,17 @@ export function cleanResult(result: unknown, profile: MonitorProfile): unknown {
 }
 
 /** Extract each declared table's rows from a cleaned result. */
-export function extractRowSets(result: unknown, profile: MonitorProfile): RowSet[] {
+export function extractRowSets(
+	result: unknown,
+	profile: MonitorProfile,
+): RowSet[] {
 	const cleaned = cleanResult(result, profile);
 	return profile.tables.map((spec) => {
 		const located = resolvePath(cleaned, spec.path);
 		const rows = Array.isArray(located)
 			? located.filter(
-					(r): r is Record<string, unknown> => r !== null && typeof r === "object" && !Array.isArray(r),
+					(r): r is Record<string, unknown> =>
+						r !== null && typeof r === "object" && !Array.isArray(r),
 				)
 			: [];
 		return { table: spec.table, rows };
@@ -70,7 +75,10 @@ function stringifyKeyPart(v: unknown): string {
 }
 
 /** The subset of fields used to decide whether a row "changed". */
-export function selectValueFields(row: Record<string, unknown>, spec: TableSpec): string[] {
+export function selectValueFields(
+	row: Record<string, unknown>,
+	spec: TableSpec,
+): string[] {
 	if (spec.valueFields && spec.valueFields.length > 0) return spec.valueFields;
 	const ignore = new Set([...(spec.ignoreFields ?? []), ...spec.keyFields]);
 	return Object.keys(row).filter((k) => !ignore.has(k));
@@ -94,7 +102,10 @@ function tryJsonParse(s: string): unknown {
 export function reparse(v: unknown): unknown {
 	if (typeof v !== "string") return v;
 	const s = v.trim();
-	if ((s.startsWith("{") && s.endsWith("}")) || (s.startsWith("[") && s.endsWith("]"))) {
+	if (
+		(s.startsWith("{") && s.endsWith("}")) ||
+		(s.startsWith("[") && s.endsWith("]"))
+	) {
 		const parsed = tryJsonParse(s);
 		if (parsed !== undefined) return parsed;
 	}
@@ -108,16 +119,23 @@ export function reparse(v: unknown): unknown {
 }
 
 /** Canonical string of a row's value-projection (order-independent, re-parsed). */
-export function canonicalValue(row: Record<string, unknown>, spec: TableSpec): string {
+export function canonicalValue(
+	row: Record<string, unknown>,
+	spec: TableSpec,
+): string {
 	const proj: Record<string, unknown> = {};
 	for (const f of selectValueFields(row, spec)) proj[f] = reparse(row[f]);
 	return canonicalJson(proj);
 }
 
 /** A keyed value-projection map for one table: businessKey → canonical value string. */
-export function keyedValueMap(rs: RowSet, spec: TableSpec): Record<string, string> {
+export function keyedValueMap(
+	rs: RowSet,
+	spec: TableSpec,
+): Record<string, string> {
 	const keyed: Record<string, string> = {};
-	for (const row of rs.rows) keyed[rowKey(row, spec)] = canonicalValue(row, spec);
+	for (const row of rs.rows)
+		keyed[rowKey(row, spec)] = canonicalValue(row, spec);
 	return keyed;
 }
 
@@ -126,7 +144,10 @@ export function keyedValueMap(rs: RowSet, spec: TableSpec): Record<string, strin
  * order-independently. Identical data in any row order yields the same hash, so
  * it is a reliable "nothing changed" gate (unlike the staging synthetic PK).
  */
-export async function snapshotHash(rowSets: RowSet[], profile: MonitorProfile): Promise<string> {
+export async function snapshotHash(
+	rowSets: RowSet[],
+	profile: MonitorProfile,
+): Promise<string> {
 	const specByTable = new Map(profile.tables.map((t) => [t.table, t]));
 	const byTable: Record<string, Record<string, string>> = {};
 	for (const rs of rowSets) {

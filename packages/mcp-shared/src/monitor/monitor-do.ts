@@ -4,9 +4,14 @@
 import { DurableObject } from "cloudflare:workers";
 import { canonicalJson, sha256Hex } from "../provenance/provenance";
 import { extractRowSets } from "./canonicalize";
-import { type McpRpcStub, callTool } from "./internal-call";
+import { callTool, type McpRpcStub } from "./internal-call";
 import { runOnce } from "./run-once";
-import { type SnapshotRow, type SqlRunner, appendSnapshot, verifySnapshotChain } from "./snapshot-chain";
+import {
+	appendSnapshot,
+	type SnapshotRow,
+	type SqlRunner,
+	verifySnapshotChain,
+} from "./snapshot-chain";
 import { SOURCES } from "./sources/index";
 
 interface MonitorEnv {
@@ -58,7 +63,10 @@ interface CheckResult {
 }
 
 function json(body: unknown, status = 200): Response {
-	return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+	return new Response(JSON.stringify(body), {
+		status,
+		headers: { "content-type": "application/json" },
+	});
 }
 
 /** One Durable Object per subscription (idFromName `sub:<id>`): owns its snapshot chain + alarm. */
@@ -69,7 +77,9 @@ export class MonitorDO extends DurableObject<MonitorEnv> {
 	constructor(ctx: DurableObjectState, env: MonitorEnv) {
 		super(ctx, env);
 		this.sql = ((strings: TemplateStringsArray, ...values: unknown[]) =>
-			this.ctx.storage.sql.exec(strings.join("?"), ...values).toArray()) as SqlRunner;
+			this.ctx.storage.sql
+				.exec(strings.join("?"), ...values)
+				.toArray()) as SqlRunner;
 		ctx.blockConcurrencyWhile(async () => this.migrate());
 	}
 
@@ -102,30 +112,42 @@ export class MonitorDO extends DurableObject<MonitorEnv> {
 			"fda-orange-book": this.env.SRV_FDA_ORANGE_BOOK,
 		};
 		const ns = bindings[server];
-		if (!ns) throw new Error(`monitor: no in-fabric binding for server '${server}'`);
+		if (!ns)
+			throw new Error(`monitor: no in-fabric binding for server '${server}'`);
 		// Stable session name keeps one warm RPC session across ticks. Agents-SDK DOs
 		// require their name set before any RPC method is called (workerd #2240).
 		const name = `rpc:monitor:${server}`;
 		const stub = ns.get(ns.idFromName(name)) as unknown as McpRpcStub;
-		await (stub as { setName?: (n: string) => Promise<unknown> }).setName?.(name);
+		await (stub as { setName?: (n: string) => Promise<unknown> }).setName?.(
+			name,
+		);
 		return stub;
 	}
 
 	private loadSub(id: string): SubscriptionRow | null {
-		return (this.sql`SELECT * FROM subscription WHERE id = ${id} LIMIT 1` as unknown as SubscriptionRow[])[0] ?? null;
+		return (
+			(
+				this
+					.sql`SELECT * FROM subscription WHERE id = ${id} LIMIT 1` as unknown as SubscriptionRow[]
+			)[0] ?? null
+		);
 	}
 
 	private firstActiveSub(): SubscriptionRow | null {
 		return (
-			(this.sql`SELECT * FROM subscription WHERE status = 'active' ORDER BY created_at LIMIT 1` as unknown as SubscriptionRow[])[0] ??
-			null
+			(
+				this
+					.sql`SELECT * FROM subscription WHERE status = 'active' ORDER BY created_at LIMIT 1` as unknown as SubscriptionRow[]
+			)[0] ?? null
 		);
 	}
 
 	private latestSnapshot(subId: string): SnapshotRow | null {
 		return (
-			(this.sql`SELECT * FROM monitor_snapshot WHERE subscription_id = ${subId} ORDER BY seq DESC LIMIT 1` as unknown as SnapshotRow[])[0] ??
-			null
+			(
+				this
+					.sql`SELECT * FROM monitor_snapshot WHERE subscription_id = ${subId} ORDER BY seq DESC LIMIT 1` as unknown as SnapshotRow[]
+			)[0] ?? null
 		);
 	}
 
@@ -133,24 +155,29 @@ export class MonitorDO extends DurableObject<MonitorEnv> {
 	private async check(subId: string): Promise<CheckResult> {
 		const sub = this.loadSub(subId);
 		if (!sub) return { ok: false, reason: "no such subscription" };
-		if (sub.status !== "active") return { ok: false, reason: `subscription is ${sub.status}` };
+		if (sub.status !== "active")
+			return { ok: false, reason: `subscription is ${sub.status}` };
 		const source = SOURCES[sub.source_id];
 		if (!source) throw new Error(`monitor: unknown source '${sub.source_id}'`);
 
 		const latest = this.latestSnapshot(subId);
-		const priorRowSets = latest ? extractRowSets(JSON.parse(latest.payload_json), source.profile) : null;
+		const priorRowSets = latest
+			? extractRowSets(JSON.parse(latest.payload_json), source.profile)
+			: null;
 
 		const result = await runOnce({
 			source,
 			input: JSON.parse(sub.input_json) as Record<string, unknown>,
-			run: async (q) => callTool(await this.stubFor(q.server), q.tool, q.params, this.nextId()),
+			run: async (q) =>
+				callTool(await this.stubFor(q.server), q.tool, q.params, this.nextId()),
 			priorRowSets,
 			priorContentHash: latest?.content_hash ?? null,
 		});
 
 		const now = new Date().toISOString();
 		if (latest && result.unchanged) {
-			this.sql`UPDATE subscription SET last_checked_at = ${now} WHERE id = ${subId}`;
+			this
+				.sql`UPDATE subscription SET last_checked_at = ${now} WHERE id = ${subId}`;
 			return { ok: true, unchanged: true, changes: 0, head: latest.entry_hash };
 		}
 
@@ -168,7 +195,8 @@ export class MonitorDO extends DurableObject<MonitorEnv> {
 				(subscription_id, snapshot_seq, detected_at, table_name, kind, key, materiality, label, change_json)
 				VALUES (${subId}, ${appended.seq}, ${now}, ${c.table}, ${c.kind}, ${c.key}, ${c.materiality ?? null}, ${c.label ?? null}, ${JSON.stringify(c)})`;
 		}
-		this.sql`UPDATE subscription SET last_checked_at = ${now}, last_content_hash = ${result.contentHash} WHERE id = ${subId}`;
+		this
+			.sql`UPDATE subscription SET last_checked_at = ${now}, last_content_hash = ${result.contentHash} WHERE id = ${subId}`;
 		return {
 			ok: true,
 			unchanged: false,
@@ -181,7 +209,8 @@ export class MonitorDO extends DurableObject<MonitorEnv> {
 
 	private async create(body: CreateBody): Promise<CheckResult> {
 		const now = new Date().toISOString();
-		this.sql`INSERT OR REPLACE INTO subscription (id, source_id, input_json, cadence_ms, status, created_at)
+		this
+			.sql`INSERT OR REPLACE INTO subscription (id, source_id, input_json, cadence_ms, status, created_at)
 			VALUES (${body.id}, ${body.source_id}, ${JSON.stringify(body.input)}, ${body.cadence_ms}, 'active', ${now})`;
 		const baseline = await this.check(body.id); // establish snapshot 1
 		await this.ctx.storage.setAlarm(Date.now() + body.cadence_ms);
@@ -189,7 +218,8 @@ export class MonitorDO extends DurableObject<MonitorEnv> {
 	}
 
 	private async changes(id: string): Promise<unknown> {
-		const rows = this.sql`SELECT * FROM monitor_change WHERE subscription_id = ${id} ORDER BY id DESC LIMIT 200` as unknown as MonitorChangeRow[];
+		const rows = this
+			.sql`SELECT * FROM monitor_change WHERE subscription_id = ${id} ORDER BY id DESC LIMIT 200` as unknown as MonitorChangeRow[];
 		const head = this.latestSnapshot(id);
 		const chain = await verifySnapshotChain(this.sql, id);
 		return {
@@ -205,7 +235,12 @@ export class MonitorDO extends DurableObject<MonitorEnv> {
 			})),
 			snapshots: chain.count,
 			head_hash: head?.entry_hash ?? null,
-			provenance: { intact: chain.valid, head: chain.head, broken_seq: chain.brokenSeq, reason: chain.reason },
+			provenance: {
+				intact: chain.valid,
+				head: chain.head,
+				broken_seq: chain.brokenSeq,
+				reason: chain.reason,
+			},
 		};
 	}
 
@@ -234,7 +269,9 @@ export class MonitorDO extends DurableObject<MonitorEnv> {
 				return json(await this.create((await req.json()) as CreateBody));
 			}
 			if (req.method === "POST" && path === "/check_now") {
-				return json(await this.check(((await req.json()) as { id: string }).id));
+				return json(
+					await this.check(((await req.json()) as { id: string }).id),
+				);
 			}
 			if (req.method === "GET" && path === "/changes") {
 				return json(await this.changes(url.searchParams.get("id") ?? ""));
@@ -246,7 +283,10 @@ export class MonitorDO extends DurableObject<MonitorEnv> {
 			}
 			return json({ ok: false, error: "not found" }, 404);
 		} catch (err) {
-			return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 500);
+			return json(
+				{ ok: false, error: err instanceof Error ? err.message : String(err) },
+				500,
+			);
 		}
 	}
 }

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { GENESIS_HASH, type SnapshotRow, buildSnapshotRow, verifyChainRows } from "./snapshot-chain";
+import {
+	buildSnapshotRow,
+	GENESIS_HASH,
+	type SnapshotRow,
+	verifyChainRows,
+} from "./snapshot-chain";
 
 const INPUT = {
 	subscriptionId: "sub_1",

@@ -28,8 +28,13 @@ describe("resolvePath", () => {
 
 describe("cleanResult", () => {
 	it("strips declared envelope keys", () => {
-		const profile: MonitorProfile = { stripKeys: ["total", "offset"], tables: [] };
-		expect(cleanResult({ total: 9, offset: 0, results: [1] }, profile)).toEqual({ results: [1] });
+		const profile: MonitorProfile = {
+			stripKeys: ["total", "offset"],
+			tables: [],
+		};
+		expect(cleanResult({ total: 9, offset: 0, results: [1] }, profile)).toEqual(
+			{ results: [1] },
+		);
 	});
 	it("passes arrays and scalars through untouched", () => {
 		const profile: MonitorProfile = { tables: [] };
@@ -40,7 +45,10 @@ describe("cleanResult", () => {
 describe("extractRowSets", () => {
 	it("locates the row array by path and drops non-objects", () => {
 		const profile: MonitorProfile = { tables: [SPEC] };
-		const rs = extractRowSets({ patents: [{ Appl_No: "1" }, 5, null] }, profile);
+		const rs = extractRowSets(
+			{ patents: [{ Appl_No: "1" }, 5, null] },
+			profile,
+		);
 		expect(rs).toHaveLength(1);
 		expect(rs[0].rows).toEqual([{ Appl_No: "1" }]);
 	});
@@ -52,7 +60,9 @@ describe("extractRowSets", () => {
 
 describe("rowKey", () => {
 	it("joins composite key fields with the separator", () => {
-		expect(rowKey({ Appl_No: "202155", Patent_No: "6967208" }, SPEC)).toBe("202155|6967208");
+		expect(rowKey({ Appl_No: "202155", Patent_No: "6967208" }, SPEC)).toBe(
+			"202155|6967208",
+		);
 	});
 	it("renders missing key parts as empty", () => {
 		expect(rowKey({ Appl_No: "202155" }, SPEC)).toBe("202155|");
@@ -61,12 +71,17 @@ describe("rowKey", () => {
 
 describe("selectValueFields", () => {
 	it("defaults to all non-key, non-ignored fields", () => {
-		const fields = selectValueFields({ Appl_No: "1", Patent_No: "2", Expire: "x", retrieved_at: "t" }, SPEC);
+		const fields = selectValueFields(
+			{ Appl_No: "1", Patent_No: "2", Expire: "x", retrieved_at: "t" },
+			SPEC,
+		);
 		expect(fields).toEqual(["Expire"]);
 	});
 	it("honors an explicit valueFields list", () => {
 		const spec: TableSpec = { ...SPEC, valueFields: ["Expire"] };
-		expect(selectValueFields({ Expire: "x", Other: "y" }, spec)).toEqual(["Expire"]);
+		expect(selectValueFields({ Expire: "x", Other: "y" }, spec)).toEqual([
+			"Expire",
+		]);
 	});
 });
 
@@ -85,8 +100,14 @@ describe("reparse", () => {
 
 describe("canonicalValue", () => {
 	it("is independent of upstream key order", () => {
-		const a = canonicalValue({ Appl_No: "1", Patent_No: "2", x: 1, y: 2 }, SPEC);
-		const b = canonicalValue({ y: 2, x: 1, Patent_No: "2", Appl_No: "1" }, SPEC);
+		const a = canonicalValue(
+			{ Appl_No: "1", Patent_No: "2", x: 1, y: 2 },
+			SPEC,
+		);
+		const b = canonicalValue(
+			{ y: 2, x: 1, Patent_No: "2", Appl_No: "1" },
+			SPEC,
+		);
 		expect(a).toBe(b);
 	});
 });
@@ -95,18 +116,38 @@ describe("snapshotHash", () => {
 	const profile: MonitorProfile = { tables: [SPEC] };
 	it("is identical when rows are reordered (the Tier-1 synthetic-PK trap)", async () => {
 		const r1 = extractRowSets(
-			{ patents: [{ Appl_No: "1", Patent_No: "A", v: 1 }, { Appl_No: "1", Patent_No: "B", v: 2 }] },
+			{
+				patents: [
+					{ Appl_No: "1", Patent_No: "A", v: 1 },
+					{ Appl_No: "1", Patent_No: "B", v: 2 },
+				],
+			},
 			profile,
 		);
 		const r2 = extractRowSets(
-			{ patents: [{ Appl_No: "1", Patent_No: "B", v: 2 }, { Appl_No: "1", Patent_No: "A", v: 1 }] },
+			{
+				patents: [
+					{ Appl_No: "1", Patent_No: "B", v: 2 },
+					{ Appl_No: "1", Patent_No: "A", v: 1 },
+				],
+			},
 			profile,
 		);
-		expect(await snapshotHash(r1, profile)).toBe(await snapshotHash(r2, profile));
+		expect(await snapshotHash(r1, profile)).toBe(
+			await snapshotHash(r2, profile),
+		);
 	});
 	it("changes when a value field changes", async () => {
-		const r1 = extractRowSets({ patents: [{ Appl_No: "1", Patent_No: "A", v: 1 }] }, profile);
-		const r2 = extractRowSets({ patents: [{ Appl_No: "1", Patent_No: "A", v: 9 }] }, profile);
-		expect(await snapshotHash(r1, profile)).not.toBe(await snapshotHash(r2, profile));
+		const r1 = extractRowSets(
+			{ patents: [{ Appl_No: "1", Patent_No: "A", v: 1 }] },
+			profile,
+		);
+		const r2 = extractRowSets(
+			{ patents: [{ Appl_No: "1", Patent_No: "A", v: 9 }] },
+			profile,
+		);
+		expect(await snapshotHash(r1, profile)).not.toBe(
+			await snapshotHash(r2, profile),
+		);
 	});
 });

@@ -24,7 +24,10 @@ function buildCode(nda: string): string {
 }
 
 /** Classify one Orange Book change into the four exclusivity-cliff event types. */
-function classify(change: RowChange): { materiality: "high" | "info"; label: string } {
+function classify(change: RowChange): {
+	materiality: "high" | "info";
+	label: string;
+} {
 	const { kind, table, key } = change;
 	if (kind === "removed") {
 		return table === "exclusivity"
@@ -40,10 +43,16 @@ function classify(change: RowChange): { materiality: "high" | "info"; label: str
 	if (delist && delist.after === "Y") {
 		return { materiality: "high", label: `Patent delisted (${key})` };
 	}
-	const dateMove = fields.find((d) => d.field === "Patent_Expire_Date_Text" || d.field === "Exclusivity_Date");
+	const dateMove = fields.find(
+		(d) =>
+			d.field === "Patent_Expire_Date_Text" || d.field === "Exclusivity_Date",
+	);
 	if (dateMove) {
 		const moved = `${String(dateMove.before)} → ${String(dateMove.after)}`;
-		return { materiality: "high", label: `Expiry date moved ${moved} (${key})` };
+		return {
+			materiality: "high",
+			label: `Expiry date moved ${moved} (${key})`,
+		};
 	}
 	return { materiality: "info", label: `Updated (${key})` };
 }
@@ -79,7 +88,11 @@ export const fdaOrangeBook: SourceModule = {
 	},
 	buildQuery(input: Record<string, unknown>): SavedQuery {
 		const nda = String(input.nda ?? input.appl_no ?? "").trim();
-		return { server: "fda-orange-book", tool: "orange_book_execute", params: { code: buildCode(nda) } };
+		return {
+			server: "fda-orange-book",
+			tool: "orange_book_execute",
+			params: { code: buildCode(nda) },
+		};
 	},
 	classify,
 };

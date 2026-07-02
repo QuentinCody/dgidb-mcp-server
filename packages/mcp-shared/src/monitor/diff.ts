@@ -9,8 +9,20 @@
  */
 
 import { canonicalJson } from "../provenance/provenance";
-import { type RowSet, canonicalValue, rowKey, selectValueFields } from "./canonicalize";
-import type { FieldDelta, MonitorProfile, RowChange, SnapshotDiff, TableSpec, TableSummary } from "./types";
+import {
+	canonicalValue,
+	type RowSet,
+	rowKey,
+	selectValueFields,
+} from "./canonicalize";
+import type {
+	FieldDelta,
+	MonitorProfile,
+	RowChange,
+	SnapshotDiff,
+	TableSpec,
+	TableSummary,
+} from "./types";
 
 interface IndexedRow {
 	row: Record<string, unknown>;
@@ -19,11 +31,15 @@ interface IndexedRow {
 
 function indexRows(rs: RowSet, spec: TableSpec): Map<string, IndexedRow> {
 	const m = new Map<string, IndexedRow>();
-	for (const row of rs.rows) m.set(rowKey(row, spec), { row, value: canonicalValue(row, spec) });
+	for (const row of rs.rows)
+		m.set(rowKey(row, spec), { row, value: canonicalValue(row, spec) });
 	return m;
 }
 
-function keyValues(row: Record<string, unknown>, spec: TableSpec): Record<string, unknown> {
+function keyValues(
+	row: Record<string, unknown>,
+	spec: TableSpec,
+): Record<string, unknown> {
 	const kv: Record<string, unknown> = {};
 	for (const f of spec.keyFields) kv[f] = row[f];
 	return kv;
@@ -34,7 +50,10 @@ function fieldDeltas(
 	after: Record<string, unknown>,
 	spec: TableSpec,
 ): FieldDelta[] {
-	const fields = new Set([...selectValueFields(before, spec), ...selectValueFields(after, spec)]);
+	const fields = new Set([
+		...selectValueFields(before, spec),
+		...selectValueFields(after, spec),
+	]);
 	const deltas: FieldDelta[] = [];
 	for (const f of fields) {
 		if (canonicalJson(before[f]) !== canonicalJson(after[f])) {
@@ -58,7 +77,13 @@ export function diffTable(
 	for (const [key, cur] of after) {
 		const prev = before.get(key);
 		if (!prev) {
-			changes.push({ table: spec.table, kind: "added", key, keyValues: keyValues(cur.row, spec), after: cur.row });
+			changes.push({
+				table: spec.table,
+				kind: "added",
+				key,
+				keyValues: keyValues(cur.row, spec),
+				after: cur.row,
+			});
 		} else if (prev.value !== cur.value) {
 			changes.push({
 				table: spec.table,
@@ -75,7 +100,13 @@ export function diffTable(
 	}
 	for (const [key, prev] of before) {
 		if (!after.has(key)) {
-			changes.push({ table: spec.table, kind: "removed", key, keyValues: keyValues(prev.row, spec), before: prev.row });
+			changes.push({
+				table: spec.table,
+				kind: "removed",
+				key,
+				keyValues: keyValues(prev.row, spec),
+				before: prev.row,
+			});
 		}
 	}
 	return { changes, unchanged };
@@ -84,7 +115,11 @@ export function diffTable(
 const EMPTY = (table: string): RowSet => ({ table, rows: [] });
 
 /** Diff two full snapshots (sets of named row-sets) per the profile's tables. */
-export function diffSnapshots(prior: RowSet[], next: RowSet[], profile: MonitorProfile): SnapshotDiff {
+export function diffSnapshots(
+	prior: RowSet[],
+	next: RowSet[],
+	profile: MonitorProfile,
+): SnapshotDiff {
 	const priorByTable = new Map(prior.map((r) => [r.table, r]));
 	const nextByTable = new Map(next.map((r) => [r.table, r]));
 	const changes: RowChange[] = [];
