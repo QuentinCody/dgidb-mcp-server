@@ -20,6 +20,7 @@ import type { ToolContext, ToolEntry } from "../registry/types";
 import { effectiveStagingThreshold } from "../staging/single-record";
 import { shouldStage, stageToDoAndRespond } from "../staging/utils";
 import { buildStageOptions } from "./api-proxy";
+import { isOversized, TRANSPORT_LIMIT } from "./passthrough-limits";
 import { buildStagedEnvelope } from "./staging-envelope";
 
 // ---------------------------------------------------------------------------
@@ -135,6 +136,29 @@ async function tryAutoStage(
 }
 
 /**
+ * #5/#6 — a NOT-staged inline envelope (data + any partial `__errors`) over the
+ * transport limit is silently dropped by MCP Streamable HTTP. Return a small
+ * `__gql_error` instead of the doomed payload, or `undefined` to let `output`
+ * through. Sizing the whole `output` catches #6: an `errors[]` attached AFTER
+ * `data` can push the combined envelope over even when `data` alone fit.
+ */
+function oversizedGqlError(
+	output: unknown,
+	staged: unknown,
+	errorCount: number,
+): Record<string, unknown> | undefined {
+	if (staged || !isOversized(output)) return undefined;
+	const suppressed =
+		errorCount > 0 ? ` (${errorCount} partial error(s) suppressed.)` : "";
+	return {
+		__gql_error: true,
+		incomplete: true,
+		code: "RESPONSE_TOO_LARGE",
+		message: `GraphQL response exceeds the ${TRANSPORT_LIMIT}-byte inline limit and no staging DO is configured; narrow the query or select fewer fields.${suppressed}`,
+	};
+}
+
+/**
  * Execute a GraphQL query and return the result, staging if needed.
  */
 async function executeAndMaybeStage(
@@ -145,11 +169,13 @@ async function executeAndMaybeStage(
 	ctx: ToolContext | undefined,
 ): Promise<unknown> {
 	const response = await gqlFetch(query, variables);
+	// An empty errors[] is NOT an error (#10): only a non-empty array signals one.
+	const errors = Array.isArray(response.errors) ? response.errors : [];
 
 	// GraphQL errors without data — return error
-	if (response.errors && !response.data) {
-		const messages = response.errors.map((e) => e.message).join("; ");
-		return { __gql_error: true, message: messages, errors: response.errors };
+	if (errors.length > 0 && !response.data) {
+		const messages = errors.map((e) => e.message).join("; ");
+		return { __gql_error: true, message: messages, errors };
 	}
 
 	// Always return response.data directly for consistent shape.
@@ -163,9 +189,12 @@ async function executeAndMaybeStage(
 	const output = staged ?? resultData;
 
 	// Attach partial errors if present (errors-only case is handled above)
-	if (response.errors && output && typeof output === "object") {
-		(output as Record<string, unknown>).__errors = response.errors;
+	if (errors.length > 0 && output && typeof output === "object") {
+		(output as Record<string, unknown>).__errors = errors;
 	}
+
+	const tooBig = oversizedGqlError(output, staged, errors.length);
+	if (tooBig) return tooBig;
 
 	return output;
 }

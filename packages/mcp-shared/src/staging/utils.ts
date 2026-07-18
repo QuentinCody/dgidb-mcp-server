@@ -9,6 +9,7 @@ import {
 	paginationCompleteness,
 } from "../completeness";
 import { getRequestScope, type MaybeExtra } from "../registry/request-scope";
+import { parseJsonResponse } from "./do-response";
 import type { SchemaHints } from "./schema-inference";
 import {
 	applyDefaultLimit,
@@ -76,15 +77,6 @@ interface QueryResponse {
 		kind: string;
 	}>;
 	validated?: boolean;
-}
-
-// ---------------------------------------------------------------------------
-
-/** Safely parse a Response body as JSON with a fallback. */
-async function parseJsonResponse<T>(resp: Response, fallback: T): Promise<T> {
-	const raw: unknown = await resp.json();
-	if (raw === null || typeof raw !== "object") return fallback;
-	return raw as T;
 }
 
 /** Decide whether a response should be staged based on byte size. */

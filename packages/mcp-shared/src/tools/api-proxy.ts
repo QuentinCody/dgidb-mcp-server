@@ -26,6 +26,7 @@ import {
 	buildKnownEndpointIndex,
 	preflightUnknownEndpoint,
 } from "./api-proxy-drift";
+import { boundedErrorData, TRANSPORT_LIMIT } from "./passthrough-limits";
 import { buildStagedEnvelope, extractStagedColumns } from "./staging-envelope";
 
 // `extractStagedColumns` is re-exported so the long-standing
@@ -172,6 +173,7 @@ export function createApiProxyTool(options: ApiProxyToolOptions): ToolEntry {
 				// Interpolate path params and extract remaining as query params
 				const { path, queryParams } = interpolatePath(rawPath, rawParams);
 				interpolatedPath = path;
+				validatePath(path); // #2 — re-check post-interpolation: a param can inject .. traversal
 
 				// T1.1 — pre-flight path check. When the path is almost certainly a
 				// hallucination (no known endpoint matches it, but a sibling under the
@@ -210,12 +212,12 @@ export function createApiProxyTool(options: ApiProxyToolOptions): ToolEntry {
 				// citation, the systemic clingen-class silent failure (doc 09/11).
 				if (typeof result.status === "number" && result.status >= 400) {
 					const dh = buildDriftHint(method, path, result.status, knownEndpoints);
-					return { __api_error: true, incomplete: true, status: result.status, message: `Upstream returned HTTP ${result.status}`, data: result.data, ...(dh ? { drift_hint: dh } : {}) };
+					return { __api_error: true, incomplete: true, status: result.status, message: `Upstream returned HTTP ${result.status}`, data: boundedErrorData(result.data), ...(dh ? { drift_hint: dh } : {}) };
 				}
 
 				// T10.1 — a SINGLE record gets a raised staging threshold so it stays
-				// inline instead of a stage→get_schema→query round-trip.
-				const responseBytes = JSON.stringify(result.data).length;
+				// inline. undefined data (a 204 no-content) sizes to 0, not a throw (#7).
+				const responseBytes = result.data === undefined ? 0 : JSON.stringify(result.data).length;
 				if (
 					doNamespace &&
 					stagingPrefix &&
@@ -249,6 +251,10 @@ export function createApiProxyTool(options: ApiProxyToolOptions): ToolEntry {
 						originalData: result.data,
 					});
 				}
+				// #3 — an UNSTAGED inline body over the transport limit is silently dropped; fail loud.
+				if (responseBytes > TRANSPORT_LIMIT) {
+					return { __api_error: true, incomplete: true, status: 413, code: "RESPONSE_TOO_LARGE", message: `Response too large (${responseBytes} > ${TRANSPORT_LIMIT}); narrow the query (fewer fields/rows) or use a paged endpoint.` };
+				}
 
 				return result.data;
 			} catch (err) {
@@ -257,7 +263,7 @@ export function createApiProxyTool(options: ApiProxyToolOptions): ToolEntry {
 				const driftHint = buildDriftHint(method, interpolatedPath, status, knownEndpoints);
 				// incomplete: a failed fetch (429/timeout/5xx/…) means the evidence for
 				// this call is INCOMPLETE — flag it so a partial answer is not read as whole.
-				return { __api_error: true, incomplete: true, status, message, data: (err as { data?: unknown }).data, ...(driftHint ? { drift_hint: driftHint } : {}) };
+				return { __api_error: true, incomplete: true, status, message, data: boundedErrorData((err as { data?: unknown }).data), ...(driftHint ? { drift_hint: driftHint } : {}) };
 			}
 		},
 	};

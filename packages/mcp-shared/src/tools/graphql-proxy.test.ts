@@ -476,3 +476,54 @@ describe("createGraphqlProxyTool — staged columns in envelope (T3.3)", () => {
 		expect(res.columns).toEqual({ genes: ["id", "name"] });
 	});
 });
+
+describe("createGraphqlProxyTool — passthrough transport-size guards (doc 11)", () => {
+	it("does NOT treat an empty errors[] with no data as an error (#10)", async () => {
+		const tool = makeTool(async () => ({ errors: [] }));
+		const result = await tool.handler({ query: "{ x }" }, stubCtx);
+		expect(result).not.toHaveProperty("__gql_error");
+		expect(result).toEqual({});
+	});
+
+	it("does NOT attach __errors for an empty errors[] alongside data (#10)", async () => {
+		const tool = makeTool(async () => ({ data: { gene: { id: 1 } }, errors: [] }));
+		const result = (await tool.handler(
+			{ query: "{ gene { id } }" },
+			stubCtx,
+		)) as Record<string, unknown>;
+		expect(result).toEqual({ gene: { id: 1 } });
+		expect(result).not.toHaveProperty("__errors");
+	});
+
+	it("fails loud on an oversized inline success with no staging DO (#5)", async () => {
+		const tool = makeTool(async () => ({ data: { blob: "x".repeat(120_000) } }));
+		const result = (await tool.handler({ query: "{ blob }" }, stubCtx)) as Record<
+			string,
+			unknown
+		>;
+		expect(result.__gql_error).toBe(true);
+		expect(result.code).toBe("RESPONSE_TOO_LARGE");
+		expect(JSON.stringify(result).length).toBeLessThan(100_000);
+	});
+
+	it("sizes the full data+errors envelope, not data alone (#6)", async () => {
+		// data (~45KB) and errors (~80KB) each fit, but combined they exceed 100KB.
+		const data = {
+			rows: Array.from({ length: 400 }, () => ({ v: "z".repeat(100) })),
+		};
+		const errors = Array.from({ length: 700 }, () => ({
+			message: "e".repeat(100),
+		}));
+		const tool = makeTool(async () => ({ data, errors }));
+		const result = (await tool.handler({ query: "{ rows }" }, stubCtx)) as Record<
+			string,
+			unknown
+		>;
+		expect(result.__gql_error).toBe(true);
+		expect(result.code).toBe("RESPONSE_TOO_LARGE");
+		expect(result.incomplete).toBe(true);
+		// The error object itself must survive transport, and note the suppressed errors.
+		expect(JSON.stringify(result).length).toBeLessThan(100_000);
+		expect(String(result.message)).toContain("partial error");
+	});
+});
