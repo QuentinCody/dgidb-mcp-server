@@ -228,3 +228,20 @@ describe("schema.enumValues()", () => {
 		expect(schema.enumValues("Gene")).toBeNull();
 	});
 });
+
+describe("buildGraphqlSchemaSource introspection-availability flag", () => {
+	it("defaults schema.available to true with a null note", () => {
+		const src = buildGraphqlSchemaSource(JSON.stringify(MOCK_INTROSPECTION));
+		expect(src).toContain("available: true");
+		expect(src).toContain("note: null");
+	});
+
+	it("marks schema.available false and embeds the note when introspection is disabled", () => {
+		const src = buildGraphqlSchemaSource(
+			JSON.stringify({ queryType: { name: "Query" }, types: [] }),
+			{ available: false, note: "introspection disabled" },
+		);
+		expect(src).toContain("available: false");
+		expect(src).toContain('note: "introspection disabled"');
+	});
+});

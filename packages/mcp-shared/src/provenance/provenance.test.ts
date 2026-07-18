@@ -105,6 +105,63 @@ describe("buildCitation", () => {
 		});
 		expect(c.data_access_id).toBe("ot_abc123");
 	});
+
+	it("flags a bare zero-record result as an UNVERIFIED negative", async () => {
+		const c = await buildCitation({
+			source: SOURCE,
+			server: "cms-partd",
+			tool: "partd_execute",
+			query: "return await api.get('/prescriber/search',{Prscrbr_NPI:'x'})",
+			result: [],
+			retrievedAt: TS,
+			recordCount: 0,
+		});
+		expect(c.negative_result).toBe(true);
+		expect(c.verification).toBe("unverified-empty");
+		expect(c.text).toContain("NEGATIVE (unverified empty");
+	});
+
+	it("marks a probe-certified empty (guard-annotated) as a stronger negative", async () => {
+		const c = await buildCitation({
+			source: SOURCE,
+			server: "cms-partd",
+			tool: "partd_execute",
+			query: "q",
+			result: { __guard: { verified_empty: true }, data: [] },
+			retrievedAt: TS,
+			recordCount: 0,
+		});
+		expect(c.negative_result).toBe(true);
+		expect(c.verification).toBe("probe-certified-empty");
+		expect(c.text).toContain("NEGATIVE (probe-certified empty)");
+	});
+
+	it("detects a guard annotation even without an explicit recordCount", async () => {
+		const c = await buildCitation({
+			source: SOURCE,
+			server: "cms-partd",
+			tool: "partd_execute",
+			query: "q",
+			result: { __guard: { verified_empty: true } },
+			retrievedAt: TS,
+		});
+		expect(c.verification).toBe("probe-certified-empty");
+	});
+
+	it("does NOT flag a normal non-empty result as negative", async () => {
+		const c = await buildCitation({
+			source: SOURCE,
+			server: "opentargets",
+			tool: "opentargets_execute",
+			query: "q",
+			result: [{ x: 1 }],
+			retrievedAt: TS,
+			recordCount: 1,
+		});
+		expect(c.negative_result).toBeUndefined();
+		expect(c.verification).toBeUndefined();
+		expect(c.text).not.toContain("NEGATIVE");
+	});
 });
 
 describe("verifyResultHash", () => {

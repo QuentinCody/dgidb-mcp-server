@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { GraphqlFetchFn } from "../codemode/graphql-introspection";
 import type { ToolContext, ToolEntry } from "../registry/types";
-import { createGraphqlProxyTool } from "./graphql-proxy";
+import { createGraphqlProxyTool, inspectGraphqlErrors } from "./graphql-proxy";
 
 function makeTool(
 	gqlFetch: GraphqlFetchFn,
@@ -99,6 +99,89 @@ function largeGqlData() {
 		},
 	};
 }
+
+describe("inspectGraphqlErrors", () => {
+	it("returns null when there are no GraphQL errors", () => {
+		expect(inspectGraphqlErrors({ data: { gene: { id: 1 } } })).toBeNull();
+	});
+
+	it("returns null for an empty errors array", () => {
+		// An empty `errors: []` is not a failure — GraphQL only signals rejection
+		// with at least one entry. Treating it as one would fail clean responses.
+		expect(inspectGraphqlErrors({ data: { gene: { id: 1 } }, errors: [] })).toBeNull();
+		expect(inspectGraphqlErrors({ errors: [] })).toBeNull();
+	});
+
+	it("reports partial:false for errors WITHOUT data — an upstream failure", () => {
+		const info = inspectGraphqlErrors({
+			errors: [{ message: "Field 'bogus' doesn't exist" }, { message: "second" }],
+		});
+		expect(info).toEqual({
+			messages: ["Field 'bogus' doesn't exist", "second"],
+			partial: false,
+		});
+	});
+
+	it("reports partial:false when data is explicitly null (errors-only)", () => {
+		// The live zincbind failure shape: {"zincsite":null} lives INSIDE data;
+		// a top-level `data: null` alongside errors carries no result at all.
+		const info = inspectGraphqlErrors({
+			data: null,
+			errors: [{ message: "Cannot query field" }],
+		});
+		expect(info?.partial).toBe(false);
+	});
+
+	it("reports partial:true for errors ALONGSIDE data", () => {
+		const info = inspectGraphqlErrors({
+			data: { zincsite: null },
+			errors: [{ message: "Deprecated field" }],
+		});
+		expect(info).toEqual({ messages: ["Deprecated field"], partial: true });
+	});
+
+	it("stringifies malformed error entries rather than dropping them", () => {
+		const info = inspectGraphqlErrors({ errors: ["plain string", { code: 500 }] });
+		expect(info?.messages).toEqual(["plain string", "[object Object]"]);
+		expect(info?.partial).toBe(false);
+	});
+
+	it("classifies the REAL zincbind rejection as a failure (captured live 2026-07-16)", () => {
+		// Verbatim body from https://api.zincbind.net for a query naming a bad field.
+		// This is the shape that used to be handed back as `success: true` with a
+		// `_meta.citation` stamped on it — the tool could not fail. Pinned here so a
+		// passthrough can never go green on it again.
+		const live = {
+			errors: [
+				{
+					message: 'Cannot query field "bogusField" on type "ZincSiteType".',
+					locations: [{ line: 1, column: 31 }],
+				},
+			],
+		};
+		const info = inspectGraphqlErrors(live);
+		expect(info?.partial).toBe(false);
+		expect(info?.messages).toEqual([
+			'Cannot query field "bogusField" on type "ZincSiteType".',
+		]);
+	});
+
+	it("leaves the REAL zincbind success untouched (captured live 2026-07-16)", () => {
+		const live = {
+			data: { zincsites: { edges: [{ node: { id: "1QJY-9", family: "H5" } }] } },
+		};
+		expect(inspectGraphqlErrors(live)).toBeNull();
+	});
+
+	it("returns null for non-object / empty bodies", () => {
+		expect(inspectGraphqlErrors(null)).toBeNull();
+		expect(inspectGraphqlErrors(undefined)).toBeNull();
+		expect(inspectGraphqlErrors("errors")).toBeNull();
+		expect(inspectGraphqlErrors({})).toBeNull();
+		// A non-array `errors` is not the GraphQL error contract.
+		expect(inspectGraphqlErrors({ errors: { message: "nope" } })).toBeNull();
+	});
+});
 
 describe("createGraphqlProxyTool — workspace-aware staging (ADR-006 Phase 0)", () => {
 	const bigFetch: GraphqlFetchFn = async () => ({ data: largeGqlData() });

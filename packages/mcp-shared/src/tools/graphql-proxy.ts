@@ -26,6 +26,42 @@ import { buildStagedEnvelope } from "./staging-envelope";
 // Tool factory
 // ---------------------------------------------------------------------------
 
+/** What a GraphQL `errors` array means for the response that carries it. */
+export interface GraphqlErrorInfo {
+	/** Flattened `errors[].message` strings. */
+	messages: string[];
+	/** True when `data` came back ALONGSIDE the errors — a partial result. */
+	partial: boolean;
+}
+
+/**
+ * Inspect a raw GraphQL response body for an `errors` array.
+ *
+ * GraphQL answers a rejected query with **HTTP 200 + `{errors:[…]}`**. A
+ * hand-built passthrough that returns that body unexamined reports
+ * `structuredContent.success: true` — and, where the server declares a `source`,
+ * stamps a `_meta.citation` on it. `isErrorResult()` only inspects
+ * `isError`/`success:false`, so such a tool **cannot fail**: it goes green
+ * against a dead API and hands the caller an error payload as an answer.
+ * Observed across rcsb-pdb, pharos, zincbind, dgidb, nci-gdc and nci-pdc.
+ *
+ * Semantics mirror the isolate-side proxy below (`__gql_error` vs `__errors`):
+ * errors WITHOUT data is a failure; errors ALONGSIDE data is a partial result
+ * that must stay visible but must not be reported as a clean success.
+ *
+ * @returns null when the body carries no GraphQL errors.
+ */
+export function inspectGraphqlErrors(result: unknown): GraphqlErrorInfo | null {
+	if (!result || typeof result !== "object") return null;
+	const body = result as { errors?: unknown; data?: unknown };
+	if (!Array.isArray(body.errors) || body.errors.length === 0) return null;
+	const messages = body.errors.map((e) => {
+		if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);
+		return String(e);
+	});
+	return { messages, partial: body.data !== undefined && body.data !== null };
+}
+
 export interface GraphqlProxyToolOptions {
 	/** Function to execute GraphQL queries on the host */
 	gqlFetch: GraphqlFetchFn;

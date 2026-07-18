@@ -28,6 +28,8 @@ export interface InlineStructuredContent {
 	success: true;
 	/** Omitted when the serialized result could exceed the ~100KB transport cap. */
 	data?: unknown;
+	/** GraphQL errors returned ALONGSIDE data — a partial result, never a clean one. */
+	partial_errors?: string[];
 	_meta: CitationMeta;
 }
 
@@ -37,6 +39,8 @@ export interface StagedStructuredContent {
 	success: true;
 	data_access_id: string;
 	processing_details: { table_count?: number; total_rows?: number };
+	/** GraphQL errors returned ALONGSIDE data — a partial result, never a clean one. */
+	partial_errors?: string[];
 	_meta: CitationMeta;
 }
 
@@ -44,11 +48,17 @@ export interface StagedStructuredContent {
  * Build structuredContent (with `_meta.citation`) for an inline result. The full
  * `result` is always cited; bulky inline data is omitted past the ~100KB cap, but
  * the complete payload still travels in the tool's `content` text.
+ *
+ * `partialErrors` carries GraphQL errors that came back ALONGSIDE data. The data is
+ * real, so the result stays `success: true` — but the errors are surfaced so a
+ * partial result can never read as clean. Errors WITHOUT data never reach here:
+ * the tool rejects them as a GRAPHQL_ERROR failure, uncited.
  */
 export async function buildInlineStructuredContent(
 	query: DgidbQuery,
 	result: unknown,
 	serializedLength: number,
+	partialErrors?: string[],
 ): Promise<InlineStructuredContent> {
 	const cite = await buildPassthroughCitation({
 		source: DGIDB_SOURCE,
@@ -60,6 +70,7 @@ export async function buildInlineStructuredContent(
 	return {
 		success: true,
 		data: serializedLength > 100_000 ? undefined : result,
+		...(partialErrors?.length ? { partial_errors: partialErrors } : {}),
 		_meta: { ...cite },
 	};
 }
@@ -73,6 +84,7 @@ export async function buildStagedStructuredContent(
 	query: DgidbQuery,
 	result: unknown,
 	staging: { data_access_id: string; processing_details: { table_count?: number; total_rows?: number } },
+	partialErrors?: string[],
 ): Promise<StagedStructuredContent> {
 	const cite = await buildPassthroughCitation({
 		source: DGIDB_SOURCE,
@@ -87,6 +99,82 @@ export async function buildStagedStructuredContent(
 		success: true,
 		data_access_id: staging.data_access_id,
 		processing_details: staging.processing_details,
+		...(partialErrors?.length ? { partial_errors: partialErrors } : {}),
 		_meta: { ...cite },
+	};
+}
+
+/** structuredContent for an upstream GraphQL rejection. */
+export interface GraphqlErrorStructuredContent {
+	[key: string]: unknown;
+	success: false;
+	error: { code: "GRAPHQL_ERROR"; message: string };
+}
+
+/** An MCP tool error result for an upstream GraphQL rejection. */
+export interface GraphqlErrorResult {
+	[key: string]: unknown;
+	content: Array<{ type: "text"; text: string }>;
+	structuredContent: GraphqlErrorStructuredContent;
+	isError: true;
+}
+
+/**
+ * Build the failure response for a GraphQL rejection — HTTP 200 + `{errors:[…]}`
+ * with NO data. Deliberately carries **no citation**: stamping provenance on an
+ * error payload is the citation-forgery path. Satisfies the fleet contract
+ * (content + structuredContent{success:false,error} + isError) so the tool can
+ * actually fail instead of going green against a dead API.
+ */
+export function buildGraphqlErrorResult(messages: string[]): GraphqlErrorResult {
+	const message = messages.join("; ");
+	console.error(`DGIdb GraphQL query failed: ${message}`);
+	return {
+		content: [{ type: "text", text: `Error: DGIdb GraphQL query failed: ${message}` }],
+		structuredContent: { success: false, error: { code: "GRAPHQL_ERROR", message } },
+		isError: true,
+	};
+}
+
+/**
+ * Build the failure response for a thrown execution error (HTTP failure, DO staging
+ * failure, bad SQL, …). Carries no citation — errors are never cited.
+ *
+ * The `structuredContent` here is load-bearing: without it this tool's error path
+ * fails the fleet contract by construction (it returned `content` + `isError` only),
+ * so the error could not be read as one by a structuredContent-based checker.
+ */
+export function buildErrorResult(message: string, error: unknown) {
+	const errorDetails = error instanceof Error ? error.message : String(error);
+	const timestamp = new Date().toISOString();
+
+	return {
+		content: [{
+			type: "text" as const,
+			text: JSON.stringify({
+				success: false,
+				error: message,
+				details: errorDetails,
+				timestamp,
+				help: "Check the DGIdb API documentation for valid query formats and parameters"
+			})
+		}],
+		structuredContent: {
+			success: false,
+			error: { code: "EXECUTION_FAILED", message: `${message}: ${errorDetails}` },
+		},
+		isError: true,
+		_meta: {
+			progress: 0.0,
+			statusMessage: message,
+			error_code: "EXECUTION_FAILED",
+			error_category: error instanceof Error && error.name ? error.name : "UnknownError",
+			timestamp,
+			recovery_suggestions: [
+				"Verify your GraphQL query syntax",
+				"Check that all required variables are provided",
+				"Ensure the DGIdb API is accessible"
+			]
+		}
 	};
 }

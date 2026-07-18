@@ -4,7 +4,10 @@ import { z } from "zod/v3";
 import { JsonToSqlDO } from "./do.js";
 import { registerCodeMode } from "./tools/code-mode.js";
 import { createQueryDataHandler, createGetSchemaHandler } from "@bio-mcp/shared/staging/utils";
+import { inspectGraphqlErrors } from "@bio-mcp/shared";
 import {
+	buildErrorResult,
+	buildGraphqlErrorResult,
 	buildInlineStructuredContent,
 	buildStagedStructuredContent,
 	type DgidbQuery,
@@ -97,6 +100,17 @@ export class DGIdbMCP extends McpAgent {
 					const graphqlResult = await this.executeGraphQLQuery(query, variables);
 					const citationQuery: DgidbQuery = { query, variables };
 
+					// GraphQL rejects a query with HTTP 200 + {errors:[…]}, and
+					// shouldBypassStaging() would hand that body straight back. Errors
+					// WITHOUT data are an upstream failure — report one, and never cite it.
+					const gqlErr = inspectGraphqlErrors(graphqlResult);
+					if (gqlErr && !gqlErr.partial) {
+						return buildGraphqlErrorResult(gqlErr.messages);
+					}
+					// Errors alongside data: the data is real, so this stays a success —
+					// but the errors ride along so a partial result never reads as clean.
+					const partialErrors = gqlErr?.messages;
+
 					if (this.shouldBypassStaging(graphqlResult, query)) {
 						const serialized = JSON.stringify(graphqlResult);
 						return {
@@ -108,6 +122,7 @@ export class DGIdbMCP extends McpAgent {
 								citationQuery,
 								graphqlResult,
 								serialized.length,
+								partialErrors,
 							),
 							isError: false,
 						};
@@ -123,12 +138,13 @@ export class DGIdbMCP extends McpAgent {
 							citationQuery,
 							graphqlResult,
 							stagingResult,
+							partialErrors,
 						),
 						isError: false,
 					};
 
 				} catch (error) {
-					return this.createErrorResponse("GraphQL execution failed", error);
+					return buildErrorResult("GraphQL execution failed", error);
 				}
 			}
 		);
@@ -154,7 +170,7 @@ export class DGIdbMCP extends McpAgent {
 						isError: false,
 					};
 				} catch (error) {
-					return this.createErrorResponse("SQL execution failed", error);
+					return buildErrorResult("SQL execution failed", error);
 				}
 			}
 		);
@@ -388,39 +404,6 @@ export class DGIdbMCP extends McpAgent {
 		return queryResult;
 	}
 
-	// ========================================
-	// ERROR HANDLING
-	// ========================================
-	private createErrorResponse(message: string, error: unknown) {
-		const errorDetails = error instanceof Error ? error.message : String(error);
-		const timestamp = new Date().toISOString();
-
-		return {
-			content: [{
-				type: "text" as const,
-				text: JSON.stringify({
-					success: false,
-					error: message,
-					details: errorDetails,
-					timestamp,
-					help: "Check the DGIdb API documentation for valid query formats and parameters"
-				})
-			}],
-			isError: true,
-			_meta: {
-				progress: 0.0,
-				statusMessage: message,
-				error_code: "EXECUTION_FAILED",
-				error_category: error instanceof Error && error.name ? error.name : "UnknownError",
-				timestamp,
-				recovery_suggestions: [
-					"Verify your GraphQL query syntax",
-					"Check that all required variables are provided",
-					"Ensure the DGIdb API is accessible"
-				]
-			}
-		};
-	}
 }
 
 // ========================================

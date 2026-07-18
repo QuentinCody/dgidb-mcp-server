@@ -135,3 +135,35 @@ describe("createGraphqlExecuteTool registers a sibling _search tool (#3)", () =>
 		expect(res.content[0].text).toContain("target(ensemblId: String!): Target");
 	});
 });
+
+describe("createGraphqlExecuteTool degrades when the API disables introspection", () => {
+	it("still runs the execute handler and injects an 'unavailable' schema", async () => {
+		captured.code = "";
+		captured.fns = {};
+		// No pre-cached introspection; gqlFetch rejects the introspection query the
+		// way an Apollo server with `introspection: false` does (errors, no data),
+		// so fetchIntrospection throws — the tool must NOT fail every execute (the
+		// NCI PDC bug). gql.query against the real API still works.
+		const tool = createGraphqlExecuteTool({
+			prefix: "pdc",
+			apiName: "NCI PDC",
+			gqlFetch: async (query: string) =>
+				query.includes("__schema")
+					? {
+							errors: [
+								{
+									message:
+										"GraphQL introspection is not allowed by Apollo Server",
+								},
+							],
+						}
+					: { data: { ok: true } },
+			loader: { get: () => ({}) },
+		});
+		const res = (await runHandler(tool)) as { isError?: boolean };
+		// Execute succeeds (raw passthrough) instead of dying at introspection.
+		expect(res).not.toHaveProperty("isError", true);
+		// The injected schema.* helpers report unavailable so isolate code can branch.
+		expect(captured.code).toContain("available: false");
+	});
+});
