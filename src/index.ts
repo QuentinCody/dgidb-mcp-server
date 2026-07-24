@@ -1,3 +1,4 @@
+import { buildHealthResponse, configureCitationSigning } from "@bio-mcp/shared";
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v3";
@@ -87,6 +88,8 @@ export class DGIdbMCP extends McpAgent {
 	});
 
 	async init() {
+
+		configureCitationSigning(this.env);
 		// Tool #1: GraphQL to SQLite staging
 		this.server.tool(
 			API_CONFIG.tools.graphql.name,
@@ -416,10 +419,7 @@ export default {
 
 		// Health check endpoint
 		if (url.pathname === "/health") {
-			return new Response("ok", {
-				status: 200,
-				headers: { "content-type": "text/plain" },
-			});
+			return buildHealthResponse("dgidb");
 		}
 
 		// Handle standard MCP requests via Streamable HTTP
