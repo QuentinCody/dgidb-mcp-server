@@ -1,7 +1,7 @@
 import { buildHealthResponse, configureCitationSigning } from "@bio-mcp/shared";
-import { McpAgent } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod/v3";
+import { StatelessMcpWorker } from "@bio-mcp/shared/mcp";
+import { McpServer } from "@bio-mcp/shared/mcp";
+import { z } from "zod";
 import { JsonToSqlDO } from "./do.js";
 import { registerCodeMode } from "./tools/code-mode.js";
 import { createQueryDataHandler, createGetSchemaHandler } from "@bio-mcp/shared/staging/utils";
@@ -81,7 +81,7 @@ const datasetRegistry = new Map<string, { created: string; table_count?: number;
 // CORE MCP SERVER CLASS
 // ========================================
 
-export class DGIdbMCP extends McpAgent {
+export class DGIdbMCP extends StatelessMcpWorker {
 	server = new McpServer({
 		name: API_CONFIG.name,
 		version: API_CONFIG.version,
@@ -424,7 +424,7 @@ export default {
 
 		// Handle standard MCP requests via Streamable HTTP
 		if (url.pathname.startsWith("/mcp")) {
-			return DGIdbMCP.serve("/mcp", { binding: "MCP_OBJECT" }).fetch(request, env, ctx);
+			return DGIdbMCP.serve("/mcp").fetch(request, env, ctx);
 		}
 
 		// Dataset management endpoints

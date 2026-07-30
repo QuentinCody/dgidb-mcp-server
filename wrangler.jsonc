@@ -30,6 +30,10 @@
 			"new_sqlite_classes": [
 				"MyMCP"
 			]
+		},
+		{
+			"tag": "mcp-2026-07-28-stateless",
+			"deleted_classes": ["MyMCP"]
 		}
 	],
 	"durable_objects": {
@@ -38,10 +42,7 @@
 				"name": "JSON_TO_SQL_DO",
 				"class_name": "JsonToSqlDO"
 			},
-			{
-				"class_name": "MyMCP",
-				"name": "MCP_OBJECT"
-			},
+
 			{
 				"name": "WORKSPACE_DO",
 				"class_name": "WorkspaceDO",

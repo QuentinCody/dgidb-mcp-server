@@ -5,7 +5,7 @@
  * for introspection-based discovery. No hand-written catalog needed.
  */
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@bio-mcp/shared/mcp";
 import { createGraphqlExecuteTool } from "@bio-mcp/shared/codemode/graphql-execute-tool";
 import type { GraphqlFetchFn } from "@bio-mcp/shared/codemode/graphql-introspection";
 
