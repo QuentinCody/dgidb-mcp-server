@@ -1,417 +1,52 @@
-import { buildHealthResponse, configureCitationSigning } from "@bio-mcp/shared";
-import { StatelessMcpWorker } from "@bio-mcp/shared/mcp";
-import { McpServer } from "@bio-mcp/shared/mcp";
-import { z } from "zod";
-import { JsonToSqlDO } from "./do.js";
-import { registerCodeMode } from "./tools/code-mode.js";
-import { createQueryDataHandler, createGetSchemaHandler } from "@bio-mcp/shared/staging/utils";
-import { inspectGraphqlErrors } from "@bio-mcp/shared";
-import {
-	buildErrorResult,
-	buildGraphqlErrorResult,
-	buildInlineStructuredContent,
-	buildStagedStructuredContent,
-	type DgidbQuery,
-} from "./lib/passthrough-citation.js";
-// DGIdb: Drug-Gene Interaction Database
-// Uses GraphQL API at dgidb.org/api/graphql
-// Migrated to shared RestStagingDO infrastructure (March 2026)
+import {buildHealthResponse, configureCitationSigning} from "@bio-mcp/shared";
+import {StatelessMcpWorker, McpServer} from "@bio-mcp/shared/mcp";
+import {DgidbDataDO} from "./do.js";
+import {registerCodeMode} from "./tools/code-mode.js";
+import {registerGraphql, registerSql} from "./tools/legacy.js";
+import {registerGetSchema, registerQueryData} from "./tools/data.js";
+import {datasetRegistry, type DgidbEnv} from "./lib/datasets.js";
 
-// ========================================
-// TYPES
-// ========================================
+const API_CONFIG = {name: "DGIdbExplorer", version: "0.1.0"};
 
-interface GraphQLResponse {
-	data?: Record<string, unknown>;
-	errors?: Array<{ message: string; [key: string]: unknown }>;
+function adminJson(body: unknown, status: number): Response {
+	return new Response(JSON.stringify(body), {status, headers: {"Content-Type": "application/json"}});
 }
 
-interface StagingProcessResult {
-	table_count?: number;
-	total_rows?: number;
+function constantTimeEqual(left: string, right: string): boolean {
+	const a = new TextEncoder().encode(left), b = new TextEncoder().encode(right);
+	let mismatch = a.length ^ b.length;
+	for (let i = 0; i < Math.max(a.length, b.length); i++) mismatch |= (a[i] ?? 0) ^ (b[i] ?? 0);
+	return mismatch === 0;
 }
 
-interface StagingResponse {
-	data_access_id: string;
-	processing_details: StagingProcessResult;
+/**
+ * The /datasets routes sit outside MCP session scoping and a data_access_id is
+ * the only capability for its rows, so they are admin-only. Missing ADMIN_TOKEN
+ * disables them (503); a missing or wrong Bearer token is 403.
+ */
+function datasetsAuthError(request: Request, env: Env): Response | null {
+	// ADMIN_TOKEN is an optional secret (`wrangler secret put ADMIN_TOKEN`), not in the generated Env.
+	const token: unknown = Reflect.get(env, "ADMIN_TOKEN");
+	if (typeof token !== "string" || !token) return adminJson({error: "admin disabled", reason: "ADMIN_TOKEN secret not set"}, 503);
+	const auth = request.headers.get("authorization") ?? "";
+	if (!auth.startsWith("Bearer ") || !constantTimeEqual(auth.slice(7), token)) return adminJson({error: "forbidden"}, 403);
+	return null;
 }
-
-interface SQLQueryResult {
-	quality_analysis_note?: string;
-	[key: string]: unknown;
-}
-
-// ========================================
-// API CONFIGURATION
-// ========================================
-const API_CONFIG = {
-	name: "DGIdbExplorer",
-	version: "0.1.0",
-	description: "MCP Server for querying GraphQL APIs and converting responses to queryable SQLite tables",
-
-	// GraphQL API settings
-	endpoint: 'https://dgidb.org/api/graphql',
-	headers: {
-		"User-Agent": "MCPDGIdbServer/0.1.0"
-	},
-
-	// Tool names and descriptions
-	tools: {
-		graphql: {
-			name: "dgidb_graphql_query",
-			description: `Executes GraphQL queries against the DGIdb (Drug-Gene Interaction Database) API. Responses are staged in SQLite tables.
-
-IMPORTANT: Gene.interactions is a plain list (NOT a Relay connection). Do NOT use pagination args (first/after) or .nodes on interactions.
-• Correct: { genes(names: ["EGFR"]) { nodes { interactions { interactionScore drug { name approved } } } } }
-• Wrong: interactions(first: 10) { nodes { ... } }
-
-Top-level queries (genes, drugs) use Relay connections with nodes/edges, but nested fields like interactions and interactionTypes are plain arrays.`
-		},
-		sql: {
-			name: "dgidb_query_sql",
-			description: "Execute read-only SQL queries against staged data. Use the data_access_id from dgidb_graphql_query to query the SQLite tables."
-		}
-	}
-};
-
-// In-memory registry of staged datasets
-const datasetRegistry = new Map<string, { created: string; table_count?: number; total_rows?: number }>();
-
-// ========================================
-// CORE MCP SERVER CLASS
-// ========================================
 
 export class DGIdbMCP extends StatelessMcpWorker {
-	server = new McpServer({
-		name: API_CONFIG.name,
-		version: API_CONFIG.version,
-	});
+  server = new McpServer(API_CONFIG);
 
-	async init() {
-
-		configureCitationSigning(this.env);
-		// Tool #1: GraphQL to SQLite staging
-		this.server.tool(
-			API_CONFIG.tools.graphql.name,
-			API_CONFIG.tools.graphql.description,
-			{
-				query: z.string().describe("GraphQL query string"),
-				variables: z.record(z.string(), z.unknown()).optional().describe("Optional variables for the GraphQL query")
-			},
-			async ({ query, variables }) => {
-				try {
-					const graphqlResult = await this.executeGraphQLQuery(query, variables);
-					const citationQuery: DgidbQuery = { query, variables };
-
-					// GraphQL rejects a query with HTTP 200 + {errors:[…]}, and
-					// shouldBypassStaging() would hand that body straight back. Errors
-					// WITHOUT data are an upstream failure — report one, and never cite it.
-					const gqlErr = inspectGraphqlErrors(graphqlResult);
-					if (gqlErr && !gqlErr.partial) {
-						return buildGraphqlErrorResult(gqlErr.messages);
-					}
-					// Errors alongside data: the data is real, so this stays a success —
-					// but the errors ride along so a partial result never reads as clean.
-					const partialErrors = gqlErr?.messages;
-
-					if (this.shouldBypassStaging(graphqlResult, query)) {
-						const serialized = JSON.stringify(graphqlResult);
-						return {
-							content: [{
-								type: "text" as const,
-								text: serialized
-							}],
-							structuredContent: await buildInlineStructuredContent(
-								citationQuery,
-								graphqlResult,
-								serialized.length,
-								partialErrors,
-							),
-							isError: false,
-						};
-					}
-
-					const stagingResult = await this.stageDataInDurableObject(graphqlResult);
-					return {
-						content: [{
-							type: "text" as const,
-							text: JSON.stringify(stagingResult)
-						}],
-						structuredContent: await buildStagedStructuredContent(
-							citationQuery,
-							graphqlResult,
-							stagingResult,
-							partialErrors,
-						),
-						isError: false,
-					};
-
-				} catch (error) {
-					return buildErrorResult("GraphQL execution failed", error);
-				}
-			}
-		);
-
-		// Tool #2: SQL querying against staged data
-		this.server.tool(
-			API_CONFIG.tools.sql.name,
-			API_CONFIG.tools.sql.description,
-			{
-				data_access_id: z.string().describe("Data access ID from the GraphQL query tool"),
-				sql: z.string().describe("SQL SELECT query to execute"),
-				params: z.array(z.string()).optional().describe("Optional query parameters"),
-				include_quality_analysis: z.boolean().optional().describe("Include data quality analysis in response")
-			},
-			async ({ data_access_id, sql, include_quality_analysis = false }) => {
-				try {
-					const queryResult = await this.executeSQLQuery(data_access_id, sql, include_quality_analysis);
-					return {
-						content: [{
-							type: "text" as const,
-							text: JSON.stringify(queryResult)
-						}],
-						isError: false,
-					};
-				} catch (error) {
-					return buildErrorResult("SQL execution failed", error);
-				}
-			}
-		);
-
-		// Shared workspace-aware query/schema tools (ADR-006 Phase 0). The legacy
-		// dgidb_query_sql tool stays as-is; these add WorkspaceDO routing so DGIdb
-		// datasets can be JOINed against other servers in a shared workspace.
-		const dgidbEnv = this.env as unknown as { JSON_TO_SQL_DO?: unknown; WORKSPACE_DO?: unknown };
-		const queryDataHandler = createQueryDataHandler("JSON_TO_SQL_DO", "dgidb", {
-			workspaceNamespace: dgidbEnv.WORKSPACE_DO,
-		});
-		this.server.registerTool(
-			"dgidb_query_data",
-			{
-				title: "Query Staged DGIdb Data",
-				description:
-					"Query staged DGIdb data using SQL. Pass `workspace` to query the shared cross-server workspace DO instead (JOIN other servers datasets).",
-				inputSchema: {
-					data_access_id: z.string().min(1).optional().describe("Data access ID for the staged dataset (omit in workspace mode)"),
-					sql: z.string().min(1).describe("SQL query to execute against the staged data"),
-					limit: z.number().int().positive().max(10000).default(100).optional().describe("Maximum number of rows to return (default: 100)"),
-					workspace: z.string().min(1).optional().describe("Shared workspace id — query the cross-server workspace DO. Omit for per-server queries."),
-				},
-			},
-			async (args, extra) =>
-				queryDataHandler(
-					args as Record<string, unknown>,
-					(extra as { env?: Record<string, unknown> })?.env ?? (this.env as unknown as Record<string, unknown>),
-				),
-		);
-
-		const getSchemaHandler = createGetSchemaHandler("JSON_TO_SQL_DO", "dgidb", {
-			workspaceNamespace: dgidbEnv.WORKSPACE_DO,
-		});
-		this.server.registerTool(
-			"dgidb_get_schema",
-			{
-				title: "Get Staged DGIdb Data Schema",
-				description:
-					"Get schema information for staged DGIdb data. Omit data_access_id to list staged datasets in this session. Pass `workspace` to read the shared cross-server workspace catalog.",
-				inputSchema: {
-					data_access_id: z.string().min(1).optional().describe("Data access ID; if omitted, lists all staged datasets in this session."),
-					workspace: z.string().min(1).optional().describe("Shared workspace id — read the cross-server workspace catalog."),
-					dataset: z.string().min(1).optional().describe("When workspace is set, scope schema to a single dataset (e.g. dgidb)."),
-				},
-			},
-			async (args, extra) =>
-				getSchemaHandler(
-					args as Record<string, unknown>,
-					(extra as { env?: Record<string, unknown> })?.env ?? (this.env as unknown as Record<string, unknown>),
-					// Pass the full extra so the listing scope matches the staging scope
-					// (getRequestScope: _meta / mcp-chat-id header, then sessionId).
-					extra as Record<string, unknown>,
-				),
-		);
-
-		// Register Code Mode (GraphQL execute tool)
-		const env = this.env as unknown as { CODE_MODE_LOADER?: { get: (...args: unknown[]) => unknown } };
-		if (env.CODE_MODE_LOADER) {
-			registerCodeMode(this.server, this.env as unknown as Parameters<typeof registerCodeMode>[1]);
-		}
-	}
-
-	// ========================================
-	// GRAPHQL CLIENT
-	// ========================================
-	private async executeGraphQLQuery(query: string, variables?: Record<string, unknown>): Promise<GraphQLResponse> {
-		const headers = {
-			"Content-Type": "application/json",
-			...API_CONFIG.headers
-		};
-
-		const body = { query, ...(variables && { variables }) };
-
-		const response = await fetch(API_CONFIG.endpoint, {
-			method: 'POST',
-			headers,
-			body: JSON.stringify(body),
-		});
-
-		if (!response.ok) {
-			const errorText = await response.text();
-			throw new Error(`HTTP ${response.status}: ${errorText}`);
-		}
-
-		return response.json() as Promise<GraphQLResponse>;
-	}
-
-	private isIntrospectionQuery(query: string): boolean {
-		if (!query) return false;
-
-		const normalizedQuery = query
-			.replace(/\s*#.*$/gm, '')
-			.replace(/\s+/g, ' ')
-			.trim()
-			.toLowerCase();
-
-		const introspectionPatterns = [
-			'__schema',
-			'__type',
-			'__typename',
-			'introspectionquery',
-			'getintrospectionquery'
-		];
-
-		return introspectionPatterns.some(pattern =>
-			normalizedQuery.includes(pattern)
-		);
-	}
-
-	private shouldBypassStaging(result: GraphQLResponse, originalQuery?: string): boolean {
-		if (!result) return true;
-
-		if (originalQuery && this.isIntrospectionQuery(originalQuery)) {
-			return true;
-		}
-
-		if (result.errors) {
-			return true;
-		}
-
-		if (result.data) {
-			if (result.data.__schema || result.data.__type) {
-				return true;
-			}
-
-			const hasSchemaMetadata = Object.values(result.data).some((value: unknown) => {
-				if (value && typeof value === 'object') {
-					const keys = Object.keys(value);
-					const schemaFields = ['types', 'queryType', 'mutationType', 'subscriptionType', 'directives'];
-					const typeFields = ['name', 'kind', 'description', 'fields', 'interfaces', 'possibleTypes', 'enumValues', 'inputFields'];
-
-					return schemaFields.some(field => keys.includes(field)) ||
-						   typeFields.filter(field => keys.includes(field)).length >= 2;
-				}
-				return false;
-			});
-
-			if (hasSchemaMetadata) {
-				return true;
-			}
-		}
-
-		// Skip staging for small responses (<1.5KB) — not worth the DO overhead
-		try {
-			if (JSON.stringify(result).length < 1500) {
-				return true;
-			}
-		} catch {
-			return true;
-		}
-
-		// Detect mostly empty data objects
-		if (result.data) {
-			const values = Object.values(result.data);
-			const hasContent = values.some((v) => {
-				if (v === null || v === undefined) return false;
-				if (Array.isArray(v)) return v.length > 0;
-				if (typeof v === "object") return Object.keys(v).length > 0;
-				return true;
-			});
-			if (!hasContent) return true;
-		}
-
-		return false;
-	}
-
-	// ========================================
-	// DURABLE OBJECT INTEGRATION
-	// ========================================
-	private async stageDataInDurableObject(graphqlResult: GraphQLResponse): Promise<StagingResponse> {
-		const env = this.env as unknown as Cloudflare.Env;
-		if (!env?.JSON_TO_SQL_DO) {
-			throw new Error("JSON_TO_SQL_DO binding not available");
-		}
-
-		const accessId = crypto.randomUUID();
-		const doId = env.JSON_TO_SQL_DO.idFromName(accessId);
-		const stub = env.JSON_TO_SQL_DO.get(doId);
-
-		const response = await stub.fetch("http://do/process", {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(graphqlResult)
-		});
-
-		if (!response.ok) {
-			const errorText = await response.text();
-			throw new Error(`DO staging failed: ${errorText}`);
-		}
-
-		const processingResult = await response.json() as StagingProcessResult;
-		datasetRegistry.set(accessId, {
-			created: new Date().toISOString(),
-			table_count: processingResult.table_count,
-			total_rows: processingResult.total_rows
-		});
-		return {
-			data_access_id: accessId,
-			processing_details: processingResult
-		};
-	}
-
-	private async executeSQLQuery(dataAccessId: string, sql: string, includeQualityAnalysis: boolean = false): Promise<SQLQueryResult> {
-		const env = this.env as unknown as Cloudflare.Env;
-		if (!env?.JSON_TO_SQL_DO) {
-			throw new Error("JSON_TO_SQL_DO binding not available");
-		}
-
-		const doId = env.JSON_TO_SQL_DO.idFromName(dataAccessId);
-		const stub = env.JSON_TO_SQL_DO.get(doId);
-
-		// Use enhanced SQL execution that automatically resolves chunked content
-		const response = await stub.fetch("http://do/query-enhanced", {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ sql })
-		});
-
-		if (!response.ok) {
-			const errorText = await response.text();
-			throw new Error(`SQL execution failed: ${errorText}`);
-		}
-
-		const queryResult = await response.json() as SQLQueryResult;
-
-		if (includeQualityAnalysis) {
-			queryResult.quality_analysis_note = "Quality analysis feature available - contact for details";
-		}
-
-		return queryResult;
-	}
-
+  async init() {
+    configureCitationSigning(this.env);
+    // SAFETY: deployment bindings are optional here so missing bindings produce tool errors.
+    const env = this.env as unknown as DgidbEnv;
+    registerGraphql(this.server, env);
+    registerSql(this.server, env);
+    registerQueryData(this.server, env);
+    registerGetSchema(this.server, env);
+    if (env.CODE_MODE_LOADER) registerCodeMode(this.server, {...env, CODE_MODE_LOADER: env.CODE_MODE_LOADER});
+  }
 }
-
-// ========================================
-// CLOUDFLARE WORKERS FETCH HANDLER
-// ========================================
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -434,7 +69,14 @@ export default {
 			return DGIdbMCP.serve("/mcp").fetch(request, env, ctx);
 		}
 
-		// Dataset management endpoints
+		// Dataset management endpoints (admin-only; see datasetsAuthError)
+		const isDatasetsRoute = (url.pathname === "/datasets" && request.method === "GET")
+			|| (url.pathname.startsWith("/datasets/") && request.method === "DELETE");
+		if (isDatasetsRoute) {
+			const denied = datasetsAuthError(request, env);
+			if (denied) return denied;
+		}
+
 		if (url.pathname === "/datasets" && request.method === "GET") {
 			const list = Array.from(datasetRegistry.entries()).map(([id, info]) => ({
 				data_access_id: id,
@@ -454,8 +96,8 @@ export default {
 				});
 			}
 
-			const doId = env.JSON_TO_SQL_DO.idFromName(id);
-			const stub = env.JSON_TO_SQL_DO.get(doId);
+			const doId = env.DGIDB_DATA_DO.idFromName(id);
+			const stub = env.DGIDB_DATA_DO.get(doId);
 			const resp = await stub.fetch("http://do/delete", { method: "DELETE" });
 			if (resp.ok) {
 				datasetRegistry.delete(id);
@@ -479,4 +121,6 @@ export default {
 };
 
 export { DGIdbMCP as MyMCP };
-export { JsonToSqlDO };
+export { DgidbDataDO };
+// Retain the old export during the class-rename rollout; no new namespace is created.
+export { DgidbDataDO as JsonToSqlDO };

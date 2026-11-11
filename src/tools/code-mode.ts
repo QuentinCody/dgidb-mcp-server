@@ -7,9 +7,9 @@
 
 import type { McpServer } from "@bio-mcp/shared/mcp";
 import { createGraphqlExecuteTool } from "@bio-mcp/shared/codemode/graphql-execute-tool";
-import type { GraphqlFetchFn } from "@bio-mcp/shared/codemode/graphql-introspection";
-
-const DGIDB_ENDPOINT = "https://dgidb.org/api/graphql";
+import { fetchDgidb } from "../lib/graphql-fetch";
+import { DGIDB_EVIDENCE_PREAMBLE } from "../lib/evidence-preamble";
+import { DGIDB_SOURCE } from "../lib/tool-response";
 
 // DGIdb-specific quirks and helpers injected into the V8 isolate
 const DGIDB_PREAMBLE = `
@@ -29,22 +29,8 @@ const DGIDB_PREAMBLE = `
 // Drug search by name: gql.query('{ drugs(names: ["IMATINIB"]) { nodes { name approved conceptId } } }')
 `;
 
-function createDgidbGqlFetch(): GraphqlFetchFn {
-	return async (query: string, variables?: Record<string, unknown>) => {
-		const response = await fetch(DGIDB_ENDPOINT, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				"User-Agent": "MCPDGIdbServer/0.1.0",
-			},
-			body: JSON.stringify({ query, ...(variables && { variables }) }),
-		});
-		return await response.json();
-	};
-}
-
 interface DgidbCodeModeEnv {
-	JSON_TO_SQL_DO: DurableObjectNamespace;
+	DGIDB_DATA_DO?: DurableObjectNamespace;
 	CODE_MODE_LOADER: { get: (...args: unknown[]) => unknown };
 	/** Cross-script binding to the shared workspace data plane (ADR-006). Optional so
 	 * the worker's hand-written Env (which omits it) still satisfies this interface;
@@ -59,19 +45,25 @@ export function registerCodeMode(
 	server: McpServer,
 	env: DgidbCodeModeEnv,
 ): void {
-	const gqlFetch = createDgidbGqlFetch();
+	const gqlFetch = fetchDgidb;
 
 	const executeTool = createGraphqlExecuteTool({
 		prefix: "dgidb",
 		// Verifiable provenance: dgidb_execute results carry a _meta.citation.
-		source: { id: "dgidb", name: "DGIdb", url: "https://www.dgidb.org" },
+		source: DGIDB_SOURCE,
 		apiName: "DGIdb",
 		gqlFetch,
-		doNamespace: env.JSON_TO_SQL_DO,
+		doNamespace: env.DGIDB_DATA_DO,
 		loader: env.CODE_MODE_LOADER,
-		preamble: DGIDB_PREAMBLE,
+		preamble: DGIDB_PREAMBLE + DGIDB_EVIDENCE_PREAMBLE,
+		stagingThreshold: 30 * 1024,
 		workspaceNamespace: env.WORKSPACE_DO,
 	});
 
-	executeTool.register(server as unknown as { tool: (...args: unknown[]) => void });
+	executeTool.register({tool: (...args: unknown[]) => {
+        const [name, ...rest] = args;
+        // SAFETY: shared factory supplies SDK arguments; only the alias changes.
+        const register = server.tool.bind(server) as (...values: unknown[]) => void;
+        register(name, ...rest); register(`mcp_${String(name)}`, ...rest);
+    }});
 }

@@ -34,13 +34,17 @@
 		{
 			"tag": "mcp-2026-07-28-stateless",
 			"deleted_classes": ["MyMCP"]
+		},
+		{
+			"tag": "dgidb-data-do-name-2026-09-30",
+			"renamed_classes": [{ "from": "JsonToSqlDO", "to": "DgidbDataDO" }]
 		}
 	],
 	"durable_objects": {
 		"bindings": [
 			{
-				"name": "JSON_TO_SQL_DO",
-				"class_name": "JsonToSqlDO"
+				"name": "DGIDB_DATA_DO",
+				"class_name": "DgidbDataDO"
 			},
 
 			{

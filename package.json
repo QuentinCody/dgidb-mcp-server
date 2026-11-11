@@ -10,7 +10,8 @@
     "lint": "biome lint --diagnostic-level=error src/",
     "lint:fix": "biome lint --fix",
     "start": "wrangler types && wrangler dev",
-    "cf-typegen": "wrangler types"
+    "cf-typegen": "wrangler types",
+    "type-check": "pnpm run cf-typegen && tsc --noEmit"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.1.3",
