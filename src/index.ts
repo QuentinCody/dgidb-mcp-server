@@ -1,3 +1,4 @@
+import { publicStagingNamespace } from "@bio-mcp/shared/mcp";
 import {buildHealthResponse, configureCitationSigning} from "@bio-mcp/shared";
 import {StatelessMcpWorker, McpServer} from "@bio-mcp/shared/mcp";
 import {DgidbDataDO} from "./do.js";
@@ -96,8 +97,8 @@ export default {
 				});
 			}
 
-			const doId = env.DGIDB_DATA_DO.idFromName(id);
-			const stub = env.DGIDB_DATA_DO.get(doId);
+			const namespace = publicStagingNamespace(env.DGIDB_DATA_DO);
+			const stub = namespace.getByName(id);
 			const resp = await stub.fetch("http://do/delete", { method: "DELETE" });
 			if (resp.ok) {
 				datasetRegistry.delete(id);

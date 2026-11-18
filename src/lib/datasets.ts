@@ -1,3 +1,4 @@
+import {isPrivateStagingBinding} from "@bio-mcp/shared/mcp";
 import {stageToDoAndRespond} from "@bio-mcp/shared/staging/utils";
 
 export interface DgidbEnv {
@@ -21,7 +22,7 @@ export async function stageResult(result: unknown, env: DgidbEnv, provenance: {t
   const staged = await stageToDoAndRespond(result, env.DGIDB_DATA_DO, "dgidb", undefined,
     {...provenance, serverName: "dgidb"}, "dgidb", extra);
   const processing_details = {table_count: staged.tablesCreated?.length, total_rows: staged.totalRows};
-  datasetRegistry.set(staged.dataAccessId, {created: new Date().toISOString(), ...processing_details});
+  if (!isPrivateStagingBinding(env.DGIDB_DATA_DO)) datasetRegistry.set(staged.dataAccessId, {created: new Date().toISOString(), ...processing_details});
   return {staged: true, data_access_id: staged.dataAccessId, processing_details,
     _staging: {...staged._staging, payload_size_bytes: new TextEncoder().encode(JSON.stringify(result)).byteLength}};
 }

@@ -1,11 +1,12 @@
+import {publicStagingNamespace} from "@bio-mcp/shared/mcp";
 import {afterEach, expect, it, vi} from "vitest";
 import worker, {DGIdbMCP} from "./index";
-import {datasetRegistry, type DgidbEnv} from "./lib/datasets";
+import {datasetRegistry} from "./lib/datasets";
 import type {DgidbToolResult} from "./lib/tool-response";
 
 afterEach(() => {vi.unstubAllGlobals(); datasetRegistry.clear();});
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), {status, headers: {"content-type": "application/json"}});
-async function registered(env: DgidbEnv = {}) {
+async function registered(env: Record<string, unknown> = {}) {
   const instance = new DGIdbMCP(undefined, {...env, CODE_MODE_LOADER: {get: () => ({})}});
   await instance.init();
   // SAFETY: SDK registry access is test-only and exercises actual registered handlers.
@@ -55,15 +56,16 @@ it("keeps workspace query and schema routing on both aliases", async () => {
 
 it("retains dataset listing/deletion for newly staged passthrough responses", async () => {
   vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => json({data: {text: "α".repeat(20000)}})));
-  const deleted: string[] = [];
+  const deleted: string[] = [], created: string[] = [];
   const ns = namespace(async (request, id) => {
     const path = new URL(request.url).pathname;
     if (path === "/delete") deleted.push(id);
+    if (path === "/process") created.push(id);
     if (path === "/process") return json({success: true, tables_created: ["records"], total_rows: 1});
     if (path === "/schema") return json({success: true, schema: {tables: {records: {columns: [{name: "text"}]}}}});
     return json({success: true});
   });
-  const tools = await registered({DGIDB_DATA_DO: ns});
+  const tools = await registered({DGIDB_DATA_DO: publicStagingNamespace(ns)});
   const result = await tools.dgidb_graphql_query.handler({query: "{ __typename }"}, {});
   const id = result.structuredContent.data_access_id;
   expect(typeof id).toBe("string");
@@ -72,7 +74,7 @@ it("retains dataset listing/deletion for newly staged passthrough responses", as
   const headers = {authorization: "Bearer fixture-admin"};
   expect(await (await worker.fetch(new Request("https://fixture/datasets", {headers}), env, ctx)).json()).toMatchObject({datasets: [{data_access_id: id, table_count: 1, total_rows: 1}]});
   expect((await worker.fetch(new Request(`https://fixture/datasets/${id}`, {method: "DELETE", headers}), env, ctx)).status).toBe(200);
-  expect(deleted).toEqual([id]); expect(datasetRegistry.has(String(id))).toBe(false);
+  expect(deleted).toHaveLength(1); expect(created).toContain(deleted[0]); expect(datasetRegistry.has(String(id))).toBe(false);
   expect((await worker.fetch(new Request(`https://fixture/datasets/${id}`, {method: "DELETE", headers}), env, ctx)).status).toBe(404);
 });
 
